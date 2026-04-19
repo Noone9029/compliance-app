@@ -15,6 +15,9 @@ type ZohoBootstrapPayload = {
     contact_name?: string;
     email?: string | null;
     phone?: string | null;
+    is_customer?: boolean;
+    is_supplier?: boolean;
+    currency_code?: string | null;
   }>;
   taxes?: Array<{
     tax_id?: string;
@@ -58,7 +61,10 @@ export class ZohoBooksAdapter implements ConnectorAdapter {
           contact_id: "zoho-demo-contact-1",
           contact_name: `${input.organizationName} Zoho Contact`,
           email: "zoho@example.com",
-          phone: "+966500000002"
+          phone: "+966500000002",
+          is_customer: true,
+          is_supplier: false,
+          currency_code: input.defaultCurrencyCode
         }
       ],
       taxes: [
@@ -90,9 +96,9 @@ export class ZohoBooksAdapter implements ConnectorAdapter {
         email: contact.email?.trim() || null,
         phone: contact.phone?.trim() || null,
         taxNumber: null,
-        isCustomer: true,
-        isSupplier: false,
-        currencyCode: null
+        isCustomer: Boolean(contact.is_customer ?? true),
+        isSupplier: Boolean(contact.is_supplier ?? false),
+        currencyCode: contact.currency_code?.trim() || null
       })),
       taxRates: (typed.taxes ?? []).map((taxRate) => ({
         externalId: taxRate.tax_id ?? null,

@@ -41,18 +41,19 @@ export class ConnectorsService {
     @Inject(QuickBooksApiClient)
     private readonly quickBooksApiClient: QuickBooksApiClient
   ) {
-    this.adapters = new Map<string, ConnectorAdapter>([
-      [xeroAdapter.provider as string, xeroAdapter as ConnectorAdapter],
-      [quickBooksAdapter.provider as string, quickBooksAdapter as ConnectorAdapter],
-      [zohoBooksAdapter.provider as string, zohoBooksAdapter as ConnectorAdapter]
-    ]);
+    const adapterEntries: Array<[string, ConnectorAdapter]> = [
+      [xeroAdapter.provider, xeroAdapter],
+      [quickBooksAdapter.provider, quickBooksAdapter],
+      [zohoBooksAdapter.provider, zohoBooksAdapter]
+    ];
 
-    this.transports = new Map<string, ConnectorProviderTransport>([
-      [
-        quickBooksTransport.provider as string,
-        quickBooksTransport as ConnectorProviderTransport
-      ]
-    ]);
+    this.adapters = new Map(adapterEntries);
+
+    const transportEntries: Array<[string, ConnectorProviderTransport]> = [
+      [quickBooksTransport.provider, quickBooksTransport]
+    ];
+
+    this.transports = new Map(transportEntries);
   }
 
   /* =========================
@@ -329,8 +330,20 @@ export class ConnectorsService {
 
     const adapter = this.getAdapter(account.provider);
 
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      select: {
+        name: true,
+        slug: true
+      }
+    });
+
+    if (!organization) {
+      throw new Error("Organization not found");
+    }
+
     const payload = await adapter.buildBootstrapImportPayload({
-      organizationName: "Demo Org",
+      organizationName: organization.name.trim() || organization.slug.trim(),
       defaultCurrencyCode: "SAR"
     });
 

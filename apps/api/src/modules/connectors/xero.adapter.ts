@@ -17,6 +17,9 @@ type XeroBootstrapPayload = {
     Phones?: Array<{
       PhoneNumber?: string | null;
     }>;
+    IsCustomer?: boolean;
+    IsSupplier?: boolean;
+    DefaultCurrency?: string | null;
   }>;
   TaxRates?: Array<{
     Name?: string;
@@ -59,7 +62,10 @@ export class XeroAdapter implements ConnectorAdapter {
           ContactID: "xero-demo-contact-1",
           Name: `${input.organizationName} Xero Contact`,
           EmailAddress: "xero@example.com",
-          Phones: [{ PhoneNumber: "+966500000001" }]
+          Phones: [{ PhoneNumber: "+966500000001" }],
+          IsCustomer: true,
+          IsSupplier: false,
+          DefaultCurrency: input.defaultCurrencyCode
         }
       ],
       TaxRates: [
@@ -90,9 +96,9 @@ export class XeroAdapter implements ConnectorAdapter {
         email: contact.EmailAddress?.trim() || null,
         phone: contact.Phones?.[0]?.PhoneNumber?.trim() || null,
         taxNumber: null,
-        isCustomer: true,
-        isSupplier: false,
-        currencyCode: null
+        isCustomer: Boolean(contact.IsCustomer ?? true),
+        isSupplier: Boolean(contact.IsSupplier ?? false),
+        currencyCode: contact.DefaultCurrency?.trim() || null
       })),
       taxRates: (typed.TaxRates ?? []).map((taxRate) => ({
         externalId: null,
@@ -112,7 +118,6 @@ export class XeroAdapter implements ConnectorAdapter {
 
   mapExportRecord(record: CanonicalExportRecord): Record<string, unknown> {
     return {
-      Type: "ACCREC",
       Contact: {
         Name: record.contactName
       },
