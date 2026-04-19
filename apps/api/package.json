@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "prisma": {
-    "seed": "tsx prisma/seed.ts"
+    "seed": "tsx prisma/seed.ts",
+    "envFile": "../../.env"
   },
   "scripts": {
     "prisma:generate": "pnpm --dir ../.. exec prisma generate --schema apps/api/prisma/schema.prisma",
@@ -39,6 +40,7 @@
     "@types/cookie-parser": "^1.4.9",
     "@types/express": "^5.0.3",
     "@types/supertest": "^6.0.3",
+    "prisma": "^6.19.3",
     "supertest": "^7.1.4",
     "vitest": "^3.2.4"
   }
