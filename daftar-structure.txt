@@ -1,0 +1,317 @@
+Compliance App
++-- .logs
+|   +-- api.err.log
+|   +-- api.out.log
+|   +-- web.err.log
+|   \-- web.out.log
++-- apps
+|   +-- api
+|   |   +-- prisma
+|   |   |   +-- migrations
+|   |   |   |   +-- 20260412114732_init
+|   |   |   |   |   \-- migration.sql
+|   |   |   |   +-- 20260412160449_week2_foundation
+|   |   |   |   |   \-- migration.sql
+|   |   |   |   +-- 20260412184435_week3_accounting_core
+|   |   |   |   |   \-- migration.sql
+|   |   |   |   +-- 20260413095342_week4_extensions
+|   |   |   |   |   \-- migration.sql
+|   |   |   |   \-- migration_lock.toml
+|   |   |   +-- schema.prisma
+|   |   |   \-- seed.ts
+|   |   +-- src
+|   |   |   +-- common
+|   |   |   |   +-- decorators
+|   |   |   |   |   \-- current-session.decorator.ts
+|   |   |   |   +-- guards
+|   |   |   |   |   \-- authenticated.guard.ts
+|   |   |   |   +-- interceptors
+|   |   |   |   +-- middleware
+|   |   |   |   |   \-- request-context.middleware.ts
+|   |   |   |   +-- prisma
+|   |   |   |   |   +-- prisma.module.ts
+|   |   |   |   |   \-- prisma.service.ts
+|   |   |   |   \-- utils
+|   |   |   |       +-- request-context.ts
+|   |   |   |       \-- require-permission.ts
+|   |   |   +-- modules
+|   |   |   |   +-- assets
+|   |   |   |   |   +-- assets.controller.ts
+|   |   |   |   |   +-- assets.module.ts
+|   |   |   |   |   \-- assets.service.ts
+|   |   |   |   +-- audit
+|   |   |   |   |   +-- audit.module.ts
+|   |   |   |   |   \-- audit.service.ts
+|   |   |   |   +-- auth
+|   |   |   |   |   +-- auth.controller.ts
+|   |   |   |   |   +-- auth.module.ts
+|   |   |   |   |   \-- auth.service.ts
+|   |   |   |   +-- billing
+|   |   |   |   |   +-- billing.controller.ts
+|   |   |   |   |   +-- billing.module.ts
+|   |   |   |   |   +-- billing.service.ts
+|   |   |   |   |   \-- billing-webhook.controller.ts
+|   |   |   |   +-- charts
+|   |   |   |   |   +-- charts.controller.ts
+|   |   |   |   |   +-- charts.module.ts
+|   |   |   |   |   \-- charts.service.ts
+|   |   |   |   +-- compliance
+|   |   |   |   |   +-- compliance.controller.ts
+|   |   |   |   |   +-- compliance.module.ts
+|   |   |   |   |   +-- compliance.service.ts
+|   |   |   |   |   +-- compliance-core.spec.ts
+|   |   |   |   |   \-- compliance-core.ts
+|   |   |   |   +-- connectors
+|   |   |   |   |   +-- connector-adapter.ts
+|   |   |   |   |   +-- connector-adapters.spec.ts
+|   |   |   |   |   +-- connectors.controller.ts
+|   |   |   |   |   +-- connectors.module.ts
+|   |   |   |   |   +-- connectors.service.ts
+|   |   |   |   |   +-- quickbooks.adapter.ts
+|   |   |   |   |   +-- xero.adapter.ts
+|   |   |   |   |   \-- zoho-books.adapter.ts
+|   |   |   |   +-- contacts
+|   |   |   |   |   +-- contacts.controller.ts
+|   |   |   |   |   +-- contacts.module.ts
+|   |   |   |   |   \-- contacts.service.ts
+|   |   |   |   +-- files
+|   |   |   |   |   +-- files.controller.ts
+|   |   |   |   |   +-- files.module.ts
+|   |   |   |   |   \-- files.service.ts
+|   |   |   |   +-- health
+|   |   |   |   |   +-- health.controller.ts
+|   |   |   |   |   +-- health.module.ts
+|   |   |   |   |   \-- health.service.ts
+|   |   |   |   +-- memberships
+|   |   |   |   |   +-- memberships.controller.ts
+|   |   |   |   |   +-- memberships.module.ts
+|   |   |   |   |   \-- memberships.service.ts
+|   |   |   |   +-- organizations
+|   |   |   |   |   +-- organizations.controller.ts
+|   |   |   |   |   +-- organizations.module.ts
+|   |   |   |   |   \-- organizations.service.ts
+|   |   |   |   +-- purchase-extensions
+|   |   |   |   |   +-- purchase-extensions.controller.ts
+|   |   |   |   |   +-- purchase-extensions.module.ts
+|   |   |   |   |   \-- purchase-extensions.service.ts
+|   |   |   |   +-- purchases
+|   |   |   |   |   +-- purchases.controller.ts
+|   |   |   |   |   +-- purchases.module.ts
+|   |   |   |   |   \-- purchases.service.ts
+|   |   |   |   +-- quotes
+|   |   |   |   |   +-- quotes.controller.ts
+|   |   |   |   |   +-- quotes.module.ts
+|   |   |   |   |   \-- quotes.service.ts
+|   |   |   |   +-- rbac
+|   |   |   |   |   +-- rbac.controller.ts
+|   |   |   |   |   +-- rbac.module.ts
+|   |   |   |   |   \-- rbac.service.ts
+|   |   |   |   +-- reports
+|   |   |   |   |   +-- derived-ledger.spec.ts
+|   |   |   |   |   +-- derived-ledger.ts
+|   |   |   |   |   +-- reports.controller.ts
+|   |   |   |   |   +-- reports.module.ts
+|   |   |   |   |   \-- reports.service.ts
+|   |   |   |   +-- sales
+|   |   |   |   |   +-- document-calculations.spec.ts
+|   |   |   |   |   +-- document-calculations.ts
+|   |   |   |   |   +-- sales.controller.ts
+|   |   |   |   |   +-- sales.module.ts
+|   |   |   |   |   \-- sales.service.ts
+|   |   |   |   +-- sales-extensions
+|   |   |   |   |   +-- sales-extensions.controller.ts
+|   |   |   |   |   +-- sales-extensions.module.ts
+|   |   |   |   |   \-- sales-extensions.service.ts
+|   |   |   |   +-- setup
+|   |   |   |   |   +-- setup.controller.ts
+|   |   |   |   |   +-- setup.module.ts
+|   |   |   |   |   \-- setup.service.ts
+|   |   |   |   \-- users
+|   |   |   |       +-- users.controller.ts
+|   |   |   |       +-- users.module.ts
+|   |   |   |       \-- users.service.ts
+|   |   |   +-- app.module.ts
+|   |   |   +-- bootstrap.ts
+|   |   |   +-- main.ts
+|   |   |   +-- platform.e2e.spec.ts
+|   |   |   +-- week2-foundation.e2e.spec.ts
+|   |   |   +-- week3-accounting.e2e.spec.ts
+|   |   |   +-- week4-extensions.e2e.spec.ts
+|   |   |   \-- week4-release-blockers.e2e.spec.ts
+|   |   +-- package.json
+|   |   +-- tsconfig.json
+|   |   \-- vitest.config.ts
+|   +-- web
+|   |   +-- app
+|   |   |   +-- [orgSlug]
+|   |   |   |   +-- [[...segments]]
+|   |   |   |   |   \-- page.tsx
+|   |   |   |   \-- layout.tsx
+|   |   |   +-- invite
+|   |   |   |   \-- accept
+|   |   |   |       \-- page.tsx
+|   |   |   +-- password
+|   |   |   |   +-- reset
+|   |   |   |   |   \-- page.tsx
+|   |   |   |   \-- reset-request
+|   |   |   |       \-- page.tsx
+|   |   |   +-- sign-in
+|   |   |   |   \-- page.tsx
+|   |   |   +-- globals.css
+|   |   |   +-- layout.tsx
+|   |   |   \-- page.tsx
+|   |   +-- components
+|   |   |   +-- week2
+|   |   |   |   +-- accounting-pages.tsx
+|   |   |   |   +-- contact-detail-view.tsx
+|   |   |   |   +-- contact-form.tsx
+|   |   |   |   +-- contacts-manager.tsx
+|   |   |   |   +-- contacts-pages.tsx
+|   |   |   |   +-- resource-manager.tsx
+|   |   |   |   +-- route-utils.spec.ts
+|   |   |   |   +-- route-utils.tsx
+|   |   |   |   +-- section-nav.tsx
+|   |   |   |   +-- settings-hub.tsx
+|   |   |   |   +-- settings-pages.tsx
+|   |   |   |   \-- singleton-form.tsx
+|   |   |   +-- week3
+|   |   |   |   +-- accounting-pages.tsx
+|   |   |   |   +-- action-button.tsx
+|   |   |   |   +-- charts-page.tsx
+|   |   |   |   +-- compliance-page.tsx
+|   |   |   |   +-- document-detail.spec.tsx
+|   |   |   |   +-- document-detail.tsx
+|   |   |   |   +-- document-form.tsx
+|   |   |   |   +-- payment-form.tsx
+|   |   |   |   +-- reports-page.tsx
+|   |   |   |   +-- shared.spec.ts
+|   |   |   |   \-- shared.tsx
+|   |   |   +-- week4
+|   |   |   |   +-- accounting-pages.tsx
+|   |   |   |   +-- billing-forms.tsx
+|   |   |   |   +-- billing-page.spec.tsx
+|   |   |   |   +-- billing-page.tsx
+|   |   |   |   +-- credit-note-form.tsx
+|   |   |   |   +-- fixed-asset-form.tsx
+|   |   |   |   +-- forms.spec.tsx
+|   |   |   |   +-- lines-editor.tsx
+|   |   |   |   +-- purchase-order-form.tsx
+|   |   |   |   \-- schedule-form.tsx
+|   |   |   +-- api.ts
+|   |   |   +-- debug-session-panel.spec.tsx
+|   |   |   +-- debug-session-panel.tsx
+|   |   |   +-- org-switcher.tsx
+|   |   |   +-- placeholder-page.tsx
+|   |   |   +-- route-map.spec.ts
+|   |   |   \-- route-map.ts
+|   |   +-- next.config.mjs
+|   |   +-- next-env.d.ts
+|   |   +-- package.json
+|   |   +-- postcss.config.js
+|   |   +-- tsconfig.json
+|   |   +-- tsconfig.tsbuildinfo
+|   |   \-- vitest.config.ts
+|   \-- worker
+|       +-- src
+|       |   \-- main.ts
+|       +-- package.json
+|       \-- tsconfig.json
++-- packages
+|   +-- config
+|   |   +-- src
+|   |   |   \-- index.ts
+|   |   +-- package.json
+|   |   +-- tsconfig.json
+|   |   \-- tsconfig.tsbuildinfo
+|   +-- sdk
+|   |   +-- src
+|   |   |   +-- index.ts
+|   |   |   \-- platform.ts
+|   |   +-- package.json
+|   |   +-- tsconfig.json
+|   |   \-- tsconfig.tsbuildinfo
+|   +-- types
+|   |   +-- src
+|   |   |   \-- index.ts
+|   |   +-- package.json
+|   |   +-- tsconfig.json
+|   |   \-- tsconfig.tsbuildinfo
+|   \-- ui
+|       +-- src
+|       |   +-- components
+|       |   |   +-- app-shell.tsx
+|       |   |   +-- button.tsx
+|       |   |   +-- card.tsx
+|       |   |   \-- status-badge.tsx
+|       |   +-- lib
+|       |   |   \-- utils.ts
+|       |   \-- index.ts
+|       +-- package.json
+|       +-- tsconfig.json
+|       \-- tsconfig.tsbuildinfo
++-- reference
+|   +-- hesaab-screenshots
+|   |   +-- opera_09J4uSgTDF.png
+|   |   +-- opera_0C75PRCcYt.png
+|   |   +-- opera_1H6NZegvYT.png
+|   |   +-- opera_1SneaCWwLf.png
+|   |   +-- opera_2xxCUQqF2P.png
+|   |   +-- opera_2ZpOX2SHaS.png
+|   |   +-- opera_4vy3zwiacH.png
+|   |   +-- opera_8DFq14gp30.png
+|   |   +-- opera_9YHlqj37BD.png
+|   |   +-- opera_A69ojdegS3.png
+|   |   +-- opera_CNIeFvuDhi.png
+|   |   +-- opera_dEP4o2Oxjk.png
+|   |   +-- opera_Er5w6b5y2D.png
+|   |   +-- opera_EyDFHVfH6T.png
+|   |   +-- opera_fS63o1UkTb.png
+|   |   +-- opera_G5pihoi0fJ.png
+|   |   +-- opera_iY6aU7MCLl.png
+|   |   +-- opera_jryA54pm4D.png
+|   |   +-- opera_llleNLATiE.png
+|   |   +-- opera_LLUxwSCCeE.png
+|   |   +-- opera_LTodmT0Daz.png
+|   |   +-- opera_mdouWYav4C.png
+|   |   +-- opera_MdX3T5ZHgp.png
+|   |   +-- opera_mhrfIKYGto.png
+|   |   +-- opera_neuUDlqMoa.png
+|   |   +-- opera_nnSSnxtMAQ.png
+|   |   +-- opera_nvn77f8a74.png
+|   |   +-- opera_Oa0kObtF2f.png
+|   |   +-- opera_PriRp0XgFo.png
+|   |   +-- opera_R9mEtnhrix.png
+|   |   +-- opera_rEXNVUd5Aa.png
+|   |   +-- opera_SrNzoMBz0G.png
+|   |   +-- opera_TVHUj7VapS.png
+|   |   +-- opera_UhEdqN2Syg.png
+|   |   +-- opera_UhME20yHMJ.png
+|   |   +-- opera_yEZVIcFqz8.png
+|   |   +-- opera_YhHBMCQegv.png
+|   |   +-- opera_YkHa9b8BOT.png
+|   |   +-- opera_zfJ9TkCuIO.png
+|   |   \-- Screenshots Hesaab.rar
+|   \-- zatca-docs
+|       +-- 20210602_ZATCA_Electronic_Invoice_Resolution_English_Vshared.pdf
+|       +-- 20220624_ZATCA_Electronic_Invoice_Security_Features_Implementation_Standards.pdf
+|       +-- 20220624_ZATCA_Electronic_Invoice_XML_Implementation_Standard_vF.pdf
+|       +-- E-invoicing Regulation EN.pdf
+|       \-- E-Invoicing_Detailed__Guideline.pdf
++-- scripts
+|   \-- run-with-workspace-env.mjs
++-- .env
++-- .env.example
++-- .gitignore
++-- .npmrc
++-- AGENTS.md
++-- daftar-structure.txt
++-- docker-compose.yml
++-- package.json
++-- pnpm-workspace.yaml
++-- print-tree.ps1
++-- tsconfig.base.json
++-- turbo.json
++-- WEEK1_STATUS.md
++-- WEEK2_STATUS.md
++-- WEEK3_STATUS.md
+\-- WEEK4_STATUS.md

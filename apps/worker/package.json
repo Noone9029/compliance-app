@@ -1,0 +1,24 @@
+{
+  "name": "@daftar/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@daftar/config": "workspace:*",
+    "@prisma/client": "^6.19.3",
+    "bullmq": "^5.58.0",
+    "ioredis": "^5.8.1",
+    "tsx": "^4.20.5"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

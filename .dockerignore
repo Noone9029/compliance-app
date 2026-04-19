@@ -1,0 +1,14 @@
+.git
+.turbo
+.logs
+node_modules
+.pnpm-store
+.env
+.env.local
+.next
+apps/web/.next
+apps/api/dist
+apps/worker/dist
+coverage
+reference
+daftar.zip

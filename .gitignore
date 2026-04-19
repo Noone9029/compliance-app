@@ -1,0 +1,90 @@
+# =========================
+# NODE
+# =========================
+node_modules/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =========================
+# BUILD OUTPUTS
+# =========================
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# =========================
+# TURBO
+# =========================
+.turbo/
+.cache/
+
+# =========================
+# ENV FILES
+# =========================
+.env.local
+.env.development
+.env.production
+.env.test
+
+# Allow base .env (since yours is empty)
+!.env
+
+# =========================
+# PRISMA / DATABASE
+# =========================
+*.db
+*.sqlite
+
+# =========================
+# DOCKER
+# =========================
+docker-data/
+postgres-data/
+redis-data/
+*.pid
+
+# =========================
+# OS FILES
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# LOGS
+# =========================
+logs/
+*.log
+
+# =========================
+# EDITOR
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# TEMP
+# =========================
+tmp/
+temp/
+
+# =========================
+# APP-SPECIFIC BUILDS
+# =========================
+apps/api/dist/
+apps/web/.next/
+apps/web/out/
+apps/worker/dist/
+
+# =========================
+# UPLOADS (future)
+# =========================
+uploads/
+storage/
