@@ -13,6 +13,9 @@ export type CanonicalContact = {
   email?: string | null;
   phone?: string | null;
   taxNumber?: string | null;
+  isCustomer: boolean;
+  isSupplier: boolean;
+  currencyCode?: string | null;
 };
 
 export type CanonicalTaxRate = {

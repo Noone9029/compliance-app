@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable } from "@nestjs/common";
-import { Prisma, ConnectorProvider } from "@prisma/client";
-
-import { PrismaService } from "../../prisma/prisma.service";
+import { Prisma } from "@prisma/client";
+import type { ConnectorProvider } from "@daftar/types";
+import { PrismaService } from "../../common/prisma/prisma.service";
 
 import { XeroAdapter } from "./xero.adapter";
 import { QuickBooksAdapter } from "./quickbooks.adapter";
@@ -27,8 +27,8 @@ import type {
 
 @Injectable()
 export class ConnectorsService {
-  private readonly adapters: Map<ConnectorProvider, ConnectorAdapter>;
-  private readonly transports: Map<ConnectorProvider, ConnectorProviderTransport>;
+  private readonly adapters: Map<string, ConnectorAdapter>;
+  private readonly transports: Map<string, ConnectorProviderTransport>;
 
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
@@ -41,14 +41,17 @@ export class ConnectorsService {
     @Inject(QuickBooksApiClient)
     private readonly quickBooksApiClient: QuickBooksApiClient
   ) {
-    this.adapters = new Map([
-      [xeroAdapter.provider, xeroAdapter],
-      [quickBooksAdapter.provider, quickBooksAdapter],
-      [zohoBooksAdapter.provider, zohoBooksAdapter]
+    this.adapters = new Map<string, ConnectorAdapter>([
+      [xeroAdapter.provider as string, xeroAdapter as ConnectorAdapter],
+      [quickBooksAdapter.provider as string, quickBooksAdapter as ConnectorAdapter],
+      [zohoBooksAdapter.provider as string, zohoBooksAdapter as ConnectorAdapter]
     ]);
 
-    this.transports = new Map([
-      [quickBooksTransport.provider, quickBooksTransport]
+    this.transports = new Map<string, ConnectorProviderTransport>([
+      [
+        quickBooksTransport.provider as string,
+        quickBooksTransport as ConnectorProviderTransport
+      ]
     ]);
   }
 
@@ -104,8 +107,7 @@ export class ConnectorsService {
       organizationId: input.organizationId,
       userId: input.userId,
       code: input.code,
-      redirectUri: input.redirectUri,
-      externalTenantId: input.externalTenantId ?? null
+      redirectUri: input.redirectUri
     });
 
     const account = await this.prisma.connectorAccount.upsert({
@@ -230,42 +232,80 @@ export class ConnectorsService {
 
     const adapter = this.getAdapter(account.provider);
 
-    const [customers, invoices] = await Promise.all([
-      this.quickBooksApiClient.listCustomers(connectorAccountId),
-      this.quickBooksApiClient.listInvoices(connectorAccountId)
-    ]);
+    if (account.provider !== "QUICKBOOKS_ONLINE") {
+      throw new Error("runQuickBooksImport called for non-QuickBooks connector");
+    }
 
-    const bundle = (adapter as QuickBooksAdapter).mapLiveImportPayload({
-      customers,
-      invoices
-    });
+    const startedAt = new Date();
 
-    const summary = await this.persistCanonicalImportBundle(
-      organizationId,
-      connectorAccountId,
-      bundle
-    );
+    try {
+      const [customers, invoices] = await Promise.all([
+        this.quickBooksApiClient.listCustomers(connectorAccountId),
+        this.quickBooksApiClient.listInvoices(connectorAccountId)
+      ]);
 
-    const log = await this.prisma.connectorSyncLog.create({
-      data: {
+      const bundle = (adapter as QuickBooksAdapter).mapLiveImportPayload({
+        customers,
+        invoices
+      });
+
+      const summary = await this.persistCanonicalImportBundle(
         organizationId,
         connectorAccountId,
-        provider: account.provider,
-        direction: "IMPORT",
-        status: "SUCCEEDED",
-        startedAt: new Date(),
-        completedAt: new Date(),
-        importedContactsCount: summary.contacts,
-        importedInvoicesCount: summary.invoices,
-        metadata: {
-          mode: "quickbooks-live",
-          customersFetched: customers.length,
-          invoicesFetched: invoices.length
-        } as Prisma.InputJsonValue
-      }
-    });
+        bundle
+      );
 
-    return log;
+      await this.prisma.connectorAccount.update({
+        where: { id: connectorAccountId },
+        data: {
+          lastSyncedAt: new Date()
+        }
+      });
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "SUCCESS",
+          retryable: false,
+          startedAt: new Date(),
+          finishedAt: new Date(),
+          metadata: {
+            mode: "quickbooks-live",
+            customersFetched: customers.length,
+            invoicesFetched: invoices.length,
+            contactsPersisted: summary.contacts,
+            invoicesPrepared: summary.invoices
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return log;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "QuickBooks import failed";
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "FAILED",
+          retryable: true,
+          message,
+          startedAt,
+          finishedAt: new Date(),
+          metadata: {
+            mode: "quickbooks-live"
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return log;
+    }
   }
 
   /* =========================
@@ -331,39 +371,84 @@ export class ConnectorsService {
     connectorAccountId: string,
     bundle: CanonicalImportBundle
   ) {
+    let persistedContacts = 0;
+
     for (const contact of bundle.contacts) {
-      await this.prisma.contact.upsert({
+      const displayName = contact.displayName.trim();
+
+      if (!displayName) continue;
+
+      const existing = await this.prisma.contact.findFirst({
         where: {
-          organizationId_displayName: {
-            organizationId,
-            displayName: contact.displayName
-          }
-        },
-        update: {
-          email: contact.email ?? undefined,
-          phone: contact.phone ?? undefined,
-          metadata: {
-            source: "connector",
-            provider: "QUICKBOOKS_ONLINE",
-            externalId: contact.externalId
-          } as Prisma.InputJsonValue
-        },
-        create: {
           organizationId,
-          displayName: contact.displayName,
-          email: contact.email ?? undefined,
-          phone: contact.phone ?? undefined,
-          metadata: {
-            source: "connector",
-            provider: "QUICKBOOKS_ONLINE",
-            externalId: contact.externalId
-          } as Prisma.InputJsonValue
+          displayName
+        },
+        orderBy: {
+          createdAt: "asc"
         }
       });
+
+      let contactId: string;
+
+      if (existing) {
+        const updated = await this.prisma.contact.update({
+          where: { id: existing.id },
+          data: {
+            companyName: existing.companyName ?? displayName,
+            email: contact.email ?? existing.email ?? undefined,
+            taxNumber: contact.taxNumber ?? existing.taxNumber ?? undefined,
+            isCustomer: contact.isCustomer,
+            isSupplier: contact.isSupplier,
+            currencyCode: contact.currencyCode ?? existing.currencyCode ?? undefined,
+            notes: `Imported from QUICKBOOKS_ONLINE connector ${connectorAccountId}`
+          }
+        });
+
+        contactId = updated.id;
+      } else {
+        const created = await this.prisma.contact.create({
+          data: {
+            organizationId,
+            displayName,
+            companyName: displayName,
+            email: contact.email ?? undefined,
+            taxNumber: contact.taxNumber ?? undefined,
+            isCustomer: contact.isCustomer,
+            isSupplier: contact.isSupplier,
+            currencyCode: contact.currencyCode ?? undefined,
+            notes: `Imported from QUICKBOOKS_ONLINE connector ${connectorAccountId}`
+          }
+        });
+
+        contactId = created.id;
+      }
+
+      const phoneNumber = contact.phone?.trim();
+
+      if (phoneNumber) {
+        const existingNumber = await this.prisma.contactNumber.findFirst({
+          where: {
+            contactId,
+            phoneNumber
+          }
+        });
+
+        if (!existingNumber) {
+          await this.prisma.contactNumber.create({
+            data: {
+              contactId,
+              label: "Primary",
+              phoneNumber
+            }
+          });
+        }
+      }
+
+      persistedContacts += 1;
     }
 
     return {
-      contacts: bundle.contacts.length,
+      contacts: persistedContacts,
       invoices: bundle.invoices.length
     };
   }

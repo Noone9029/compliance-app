@@ -120,12 +120,15 @@ export class QuickBooksAdapter implements ConnectorAdapter {
     const typed = payload as QuickBooksBootstrapPayload;
 
     return {
-      contacts: (typed.customers ?? []).map((customer) => ({
+      contacts: (typed.customers ?? []).map((customer): CanonicalContact => ({
         externalId: customer.id,
         displayName: customer.displayName,
         email: customer.email ?? null,
         phone: customer.phone ?? null,
-        taxNumber: null
+        taxNumber: null,
+        isCustomer: true,
+        isSupplier: false,
+        currencyCode: null
       })),
       taxRates: (typed.taxRates ?? []).map((taxRate) => ({
         externalId: taxRate.id,
@@ -193,7 +196,10 @@ export class QuickBooksAdapter implements ConnectorAdapter {
         customer.PrimaryPhone?.FreeFormNumber?.trim() ||
         customer.Mobile?.FreeFormNumber?.trim() ||
         null,
-      taxNumber: null
+      taxNumber: null,
+      isCustomer: true,
+      isSupplier: false,
+      currencyCode: null
     };
   }
 

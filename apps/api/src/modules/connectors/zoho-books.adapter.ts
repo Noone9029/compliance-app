@@ -1,156 +1,122 @@
 import { Injectable } from "@nestjs/common";
-import type { ConnectorSyncPreviewRecord } from "@daftar/types";
+import type { ConnectorProvider } from "@daftar/types";
 
 import type {
+  CanonicalContact,
+  CanonicalExportRecord,
+  CanonicalImportBundle,
   ConnectorAdapter,
-  ConnectorBootstrapContext,
-  ConnectorBootstrapImportBundle,
-  ConnectorCanonicalExportRecord,
-  ConnectorPreviewInput
+  ConnectorExportPreview
 } from "./connector-adapter";
+
+type ZohoBootstrapPayload = {
+  contacts?: Array<{
+    contact_id?: string;
+    contact_name?: string;
+    email?: string | null;
+    phone?: string | null;
+  }>;
+  taxes?: Array<{
+    tax_id?: string;
+    tax_name?: string;
+    tax_percentage?: number | string;
+    tax_authority_id?: string | null;
+  }>;
+  chart_of_accounts?: Array<{
+    account_id?: string;
+    account_code?: string | null;
+    account_name?: string;
+    account_type?: string | null;
+  }>;
+};
 
 @Injectable()
 export class ZohoBooksAdapter implements ConnectorAdapter {
-  provider = "ZOHO_BOOKS" as const;
+  readonly provider: ConnectorProvider = "ZOHO_BOOKS";
 
-  buildPreview(input: ConnectorPreviewInput): ConnectorSyncPreviewRecord {
+  async buildExportPreview(
+    input: ConnectorExportPreview
+  ): Promise<Record<string, unknown>> {
     return {
-      connectorAccountId: input.connectorAccountId,
       provider: this.provider,
-      direction: input.direction,
-      scopes: [
-        { scope: "contacts", recordCount: input.contactCount },
-        { scope: "invoices", recordCount: input.invoiceCount },
-        { scope: "vendor-bills", recordCount: input.billCount },
-        { scope: "quotes", recordCount: input.quoteCount },
-        { scope: "fixed-assets", recordCount: input.assetCount }
-      ],
-      generatedAt: new Date().toISOString()
+      summary: {
+        contacts: input.contacts,
+        invoices: input.invoices,
+        bills: input.bills,
+        quotes: input.quotes
+      }
     };
   }
 
-  buildSuccessMessage(scopeCount: number) {
-    return `Zoho Books export completed for ${scopeCount} scopes.`;
-  }
-
-  buildImportSuccessMessage(scopeCount: number) {
-    return `Zoho Books bootstrap import completed for ${scopeCount} scopes.`;
-  }
-
-  buildBootstrapImportPayload(context: ConnectorBootstrapContext) {
+  async buildBootstrapImportPayload(input: {
+    organizationName: string;
+    defaultCurrencyCode: string;
+  }): Promise<Record<string, unknown>> {
     return {
       contacts: [
         {
-          contact_id: `${context.organizationSlug}-zoho-contact`,
-          contact_name: `${context.organizationName} Zoho Contact`,
-          email: `zoho.${context.organizationSlug}@example.com`,
-          contact_type: "customer",
-          currency_code: context.currencyCode
+          contact_id: "zoho-demo-contact-1",
+          contact_name: `${input.organizationName} Zoho Contact`,
+          email: "zoho@example.com",
+          phone: "+966500000002"
         }
       ],
       taxes: [
         {
-          tax_name: "Zoho VAT 15",
-          tax_percentage: "15.00",
-          tax_authority_id: "ZOHO15"
+          tax_id: "zoho-tax-1",
+          tax_name: "VAT 15%",
+          tax_percentage: 15,
+          tax_authority_id: "VAT15"
         }
       ],
       chart_of_accounts: [
         {
-          account_code: "1390",
-          account_name: "Zoho Fixed Assets",
-          account_type: "ASSET"
+          account_id: "zoho-account-1",
+          account_code: "300",
+          account_name: "Revenue",
+          account_type: "REVENUE"
         }
       ]
     };
   }
 
-  mapBootstrapImportPayload(
-    payload: Record<string, unknown>
-  ): ConnectorBootstrapImportBundle {
-    const contacts = Array.isArray(payload.contacts) ? payload.contacts : [];
-    const taxRates = Array.isArray(payload.taxes) ? payload.taxes : [];
-    const accounts = Array.isArray(payload.chart_of_accounts)
-      ? payload.chart_of_accounts
-      : [];
+  mapBootstrapImportPayload(payload: Record<string, unknown>): CanonicalImportBundle {
+    const typed = payload as ZohoBootstrapPayload;
 
     return {
-      contacts: contacts.map((entry) => {
-        const contact = entry as Record<string, unknown>;
-        const contactType = String(contact.contact_type ?? "customer");
-        return {
-          displayName: String(contact.contact_name ?? "Imported Zoho Contact"),
-          email: contact.email ? String(contact.email) : null,
-          isCustomer: contactType !== "vendor",
-          isSupplier: contactType === "vendor",
-          currencyCode: contact.currency_code ? String(contact.currency_code) : null
-        };
-      }),
-      taxRates: taxRates.map((entry) => {
-        const taxRate = entry as Record<string, unknown>;
-        return {
-          name: String(taxRate.tax_name ?? "Imported Zoho Tax"),
-          code: String(taxRate.tax_authority_id ?? "ZOHO"),
-          rate: String(taxRate.tax_percentage ?? "0.00"),
-          scope: "BOTH"
-        };
-      }),
-      accounts: accounts.map((entry) => {
-        const account = entry as Record<string, unknown>;
-        return {
-          code: String(account.account_code ?? "1300"),
-          name: String(account.account_name ?? "Imported Zoho Account"),
-          type: String(account.account_type ?? "ASSET") as
-            | "ASSET"
-            | "LIABILITY"
-            | "EQUITY"
-            | "REVENUE"
-            | "EXPENSE"
-        };
-      })
+      contacts: (typed.contacts ?? []).map((contact): CanonicalContact => ({
+        externalId: contact.contact_id ?? null,
+        displayName: contact.contact_name?.trim() || "Zoho Contact",
+        email: contact.email?.trim() || null,
+        phone: contact.phone?.trim() || null,
+        taxNumber: null,
+        isCustomer: true,
+        isSupplier: false,
+        currencyCode: null
+      })),
+      taxRates: (typed.taxes ?? []).map((taxRate) => ({
+        externalId: taxRate.tax_id ?? null,
+        name: taxRate.tax_name?.trim() || "Zoho Tax",
+        rate: Number(taxRate.tax_percentage ?? 0),
+        code: taxRate.tax_authority_id?.trim() || null
+      })),
+      accounts: (typed.chart_of_accounts ?? []).map((account) => ({
+        externalId: account.account_id ?? null,
+        code: account.account_code?.trim() || null,
+        name: account.account_name?.trim() || "Zoho Account",
+        type: account.account_type?.trim() || null
+      })),
+      invoices: []
     };
   }
 
-  mapCanonicalExportRecord(record: ConnectorCanonicalExportRecord) {
-    switch (record.entity) {
-      case "contact":
-        return {
-          contact_name: record.displayName,
-          email: record.email,
-          contact_type: record.isSupplier && !record.isCustomer ? "vendor" : "customer",
-          currency_code: record.currencyCode
-        };
-      case "invoice":
-        return {
-          invoice_number: record.documentNumber,
-          customer_name: record.contactName,
-          total: record.total,
-          currency_code: record.currencyCode,
-          status: record.status
-        };
-      case "bill":
-        return {
-          bill_number: record.documentNumber,
-          vendor_name: record.contactName,
-          total: record.total,
-          currency_code: record.currencyCode,
-          status: record.status
-        };
-      case "quote":
-        return {
-          estimate_number: record.documentNumber,
-          customer_name: record.contactName,
-          total: record.total,
-          currency_code: record.currencyCode,
-          status: record.status
-        };
-      case "asset":
-        return {
-          asset_number: record.assetNumber,
-          asset_name: record.name,
-          net_book_value: record.netBookValue,
-          currency_code: record.currencyCode
-        };
-    }
+  mapExportRecord(record: CanonicalExportRecord): Record<string, unknown> {
+    return {
+      invoice_number: record.invoiceNumber,
+      customer_name: record.contactName,
+      total: record.total,
+      currency_code: record.currency,
+      status: record.status
+    };
   }
 }
