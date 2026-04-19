@@ -37,11 +37,15 @@ const connectorSyncSchema = z.object({
 @Controller("v1/connectors")
 @UseGuards(AuthenticatedGuard)
 export class ConnectorsController {
-  constructor(@Inject(ConnectorsService) private readonly connectorsService: ConnectorsService) {}
+  constructor(
+    @Inject(ConnectorsService)
+    private readonly connectorsService: ConnectorsService
+  ) {}
 
   @Get("accounts")
   listAccounts(@CurrentSession() session: AuthenticatedRequest["currentSession"]) {
     requirePermission(session, "connectors.read");
+
     return this.connectorsService.listAccounts(session!.organization!.id);
   }
 
@@ -52,6 +56,7 @@ export class ConnectorsController {
     @Query() query: unknown
   ) {
     requirePermission(session, "connectors.write");
+
     const provider = providerSchema.parse(providerParam);
     const { redirectUri } = connectQuerySchema.parse(query);
 
@@ -70,6 +75,7 @@ export class ConnectorsController {
     @Body() body: unknown
   ) {
     requirePermission(session, "connectors.write");
+
     const provider = providerSchema.parse(providerParam);
     const input = callbackBodySchema.parse(body);
 
@@ -87,6 +93,7 @@ export class ConnectorsController {
     @Query("connectorAccountId") connectorAccountId: string | undefined
   ) {
     requirePermission(session, "connectors.read");
+
     return this.connectorsService.listLogs(
       session!.organization!.id,
       connectorAccountId?.trim() || undefined
@@ -99,6 +106,7 @@ export class ConnectorsController {
     @Param("connectorAccountId") connectorAccountId: string
   ) {
     requirePermission(session, "connectors.read");
+
     return this.connectorsService.getExportPreview(
       session!.organization!.id,
       connectorAccountId
@@ -112,6 +120,7 @@ export class ConnectorsController {
     @Body() body: unknown
   ) {
     requirePermission(session, "connectors.sync");
+
     const input = connectorSyncSchema.parse(body ?? {});
 
     return this.connectorsService.runSync(

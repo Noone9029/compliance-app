@@ -2,6 +2,8 @@ import { BadRequestException, Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { ConnectorProvider } from "@daftar/types";
 import { PrismaService } from "../../common/prisma/prisma.service";
+import { SalesInvoiceStatus } from "@prisma/client";
+import { createHash, randomUUID } from "crypto";
 
 import { XeroAdapter } from "./xero.adapter";
 import { QuickBooksAdapter } from "./quickbooks.adapter";
@@ -255,6 +257,17 @@ export class ConnectorsService {
         connectorAccountId,
         bundle
       );
+      const complianceDocsCreated =
+      await this.createComplianceDocumentsForInvoices(
+        organizationId,
+        connectorAccountId
+      );
+
+      const xmlGenerated =
+      await this.generateXmlForComplianceDocuments(
+        organizationId,
+        connectorAccountId
+      );
 
       await this.prisma.connectorAccount.update({
         where: { id: connectorAccountId },
@@ -283,7 +296,20 @@ export class ConnectorsService {
         }
       });
 
-      return log;
+      return {
+        ok: true,
+        mode: "quickbooks-live",
+        organizationId,
+        connectorAccountId,
+        imported: {
+          contacts: summary.contacts,
+          invoices: summary.invoices
+        },
+        complianceDocumentsCreated: complianceDocsCreated,
+        xmlGenerated,
+        log
+      };
+
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "QuickBooks import failed";
@@ -305,7 +331,14 @@ export class ConnectorsService {
         }
       });
 
-      return log;
+      return {
+        ok: false,
+        mode: "quickbooks-live",
+        organizationId,
+        connectorAccountId,
+        message,
+        log
+      };
     }
   }
 
@@ -355,7 +388,37 @@ export class ConnectorsService {
       bundle
     );
 
-    return summary;
+    const complianceDocsCreated =
+      await this.createComplianceDocumentsForInvoices(
+        organizationId,
+        connectorAccountId
+      );
+    
+    const xmlGenerated =
+      await this.generateXmlForComplianceDocuments(
+        organizationId,
+        connectorAccountId
+      );
+
+    return {
+      ok: true,
+      mode: "bootstrap",
+      organizationId,
+      connectorAccountId,
+      imported: {
+        contacts: summary.contacts,
+        invoices: summary.invoices
+      },
+      complianceDocumentsCreated: complianceDocsCreated,
+      xmlGenerated
+    };
+  }
+
+  async getExportPreview(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    return this.runExportPreview(organizationId, connectorAccountId, null);
   }
 
   /* =========================
@@ -384,91 +447,546 @@ export class ConnectorsService {
     connectorAccountId: string,
     bundle: CanonicalImportBundle
   ) {
+    const contactIdsByExternalId = new Map<string, string>();
     let persistedContacts = 0;
 
     for (const contact of bundle.contacts) {
-      const displayName = contact.displayName.trim();
+      const contactId = await this.upsertImportedContact(
+        organizationId,
+        connectorAccountId,
+        contact
+      );
 
-      if (!displayName) continue;
-
-      const existing = await this.prisma.contact.findFirst({
-        where: {
-          organizationId,
-          displayName
-        },
-        orderBy: {
-          createdAt: "asc"
-        }
-      });
-
-      let contactId: string;
-
-      if (existing) {
-        const updated = await this.prisma.contact.update({
-          where: { id: existing.id },
-          data: {
-            companyName: existing.companyName ?? displayName,
-            email: contact.email ?? existing.email ?? undefined,
-            taxNumber: contact.taxNumber ?? existing.taxNumber ?? undefined,
-            isCustomer: contact.isCustomer,
-            isSupplier: contact.isSupplier,
-            currencyCode: contact.currencyCode ?? existing.currencyCode ?? undefined,
-            notes: `Imported from QUICKBOOKS_ONLINE connector ${connectorAccountId}`
-          }
-        });
-
-        contactId = updated.id;
-      } else {
-        const created = await this.prisma.contact.create({
-          data: {
-            organizationId,
-            displayName,
-            companyName: displayName,
-            email: contact.email ?? undefined,
-            taxNumber: contact.taxNumber ?? undefined,
-            isCustomer: contact.isCustomer,
-            isSupplier: contact.isSupplier,
-            currencyCode: contact.currencyCode ?? undefined,
-            notes: `Imported from QUICKBOOKS_ONLINE connector ${connectorAccountId}`
-          }
-        });
-
-        contactId = created.id;
-      }
-
-      const phoneNumber = contact.phone?.trim();
-
-      if (phoneNumber) {
-        const existingNumber = await this.prisma.contactNumber.findFirst({
-          where: {
-            contactId,
-            phoneNumber
-          }
-        });
-
-        if (!existingNumber) {
-          await this.prisma.contactNumber.create({
-            data: {
-              contactId,
-              label: "Primary",
-              phoneNumber
-            }
-          });
-        }
+      if (contact.externalId) {
+        contactIdsByExternalId.set(contact.externalId, contactId);
       }
 
       persistedContacts += 1;
     }
 
+    const persistedInvoices = await this.persistCanonicalInvoices(
+      organizationId,
+      connectorAccountId,
+      bundle.invoices,
+      contactIdsByExternalId
+    );
+
     return {
       contacts: persistedContacts,
-      invoices: bundle.invoices.length
+      invoices: persistedInvoices
     };
   }
 
   /* =========================
      HELPERS
   ========================= */
+
+
+  private mapImportedInvoiceStatus(
+    sourceStatus: string,
+    balance: number,
+    total: number
+  ):  SalesInvoiceStatus {
+    const normalized = sourceStatus.trim().toUpperCase();
+
+    if (normalized === "PAID") {
+      return "PAID";
+    }
+
+    if (normalized === "VOID" || normalized === "VOIDED") {
+      return "VOID";
+    }
+
+    if (Number(balance) <= 0 && Number(total) > 0) {
+      return "PAID";
+    }
+
+    if (Number(balance) > 0 && Number(balance) < Number(total)) {
+      return "PARTIALLY_PAID";
+    }
+
+    if (normalized === "DRAFT") {
+      return "DRAFT";
+    }
+
+    return "ISSUED";
+  }
+
+  private async findMatchingTaxRate(
+    organizationId: string,
+    code: string | null,
+    rate: number | null
+  ) {
+    if (code) {
+      const byCode = await this.prisma.taxRate.findFirst({
+        where: {
+          organizationId,
+          code
+        }
+      });
+
+      if (byCode) {
+        return byCode;
+      }
+    }
+
+    if (typeof rate === "number") {
+      const byRate = await this.prisma.taxRate.findFirst({
+        where: {
+          organizationId,
+          rate: this.toMoney(rate)
+        }
+      });
+
+      if (byRate) {
+        return byRate;
+      }
+    }
+
+    return null;
+  }
+
+  private toMoney(value: number | string | Prisma.Decimal) {
+    return new Prisma.Decimal(value).toDecimalPlaces(2);
+  }
+
+  private async resolveImportedInvoiceContact(
+    organizationId: string,
+    connectorAccountId: string,
+    invoice: CanonicalImportBundle["invoices"][number],
+    contactIdsByExternalId: Map<string, string>
+  ) {
+    if (invoice.contactExternalId) {
+      const mapped = contactIdsByExternalId.get(invoice.contactExternalId);
+      if (mapped) {
+        return mapped;
+      }
+    }
+
+    const byName = await this.prisma.contact.findFirst({
+      where: {
+        organizationId,
+        displayName: invoice.contactDisplayName
+      },
+      orderBy: {
+        createdAt: "asc"
+      }
+    });
+
+    if (byName) {
+      return byName.id;
+    }
+
+    const created = await this.prisma.contact.create({
+      data: {
+        organizationId,
+        displayName: invoice.contactDisplayName,
+        companyName: invoice.contactDisplayName,
+        isCustomer: true,
+        isSupplier: false,
+        notes: `Auto-created from imported invoice via connector ${connectorAccountId}`
+      }
+    });
+
+    if (invoice.contactExternalId) {
+      contactIdsByExternalId.set(invoice.contactExternalId, created.id);
+    }
+
+    return created.id;
+  }
+
+  private generateInvoiceXml(invoice: any, doc: any) {
+    return `
+  <Invoice>
+    <UUID>${doc.uuid}</UUID>
+    <InvoiceNumber>${invoice.invoiceNumber}</InvoiceNumber>
+    <IssueDate>${invoice.issueDate.toISOString()}</IssueDate>
+
+    <AccountingCustomerParty>
+      <Name>${invoice.contact?.displayName ?? "Customer"}</Name>
+    </AccountingCustomerParty>
+
+    <LegalMonetaryTotal>
+      <PayableAmount currencyID="${invoice.currencyCode}">
+        ${invoice.total.toString()}
+      </PayableAmount>
+    </LegalMonetaryTotal>
+
+    <InvoiceLines>
+      ${invoice.lines
+        .map(
+          (line: any) => `
+        <Line>
+          <Description>${line.description}</Description>
+          <Quantity>${line.quantity}</Quantity>
+          <UnitPrice>${line.unitPrice}</UnitPrice>
+          <LineTotal>${line.lineTotal}</LineTotal>
+        </Line>
+      `
+        )
+        .join("")}
+    </InvoiceLines>
+  </Invoice>
+  `;
+  }
+
+  private async generateXmlForComplianceDocuments(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        organizationId,
+        xmlContent: ""
+      },
+      include: {
+        salesInvoice: {
+          include: {
+            lines: true,
+            contact: true
+          }
+        }
+      }
+    });
+
+    let generated = 0;
+
+    for (const doc of docs) {
+      const xml = this.generateInvoiceXml(doc.salesInvoice, doc);
+
+      await this.prisma.complianceDocument.update({
+        where: { id: doc.id },
+        data: {
+          xmlContent: xml,
+          status: "READY"
+        }
+      });
+
+      generated++;
+    }
+
+    return generated;
+  }
+
+  private async createComplianceDocumentsForInvoices(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    const invoices = await this.prisma.salesInvoice.findMany({
+      where: {
+        organizationId,
+        sourceConnectorAccountId: connectorAccountId
+      },
+      orderBy: {
+        createdAt: "asc"
+      }
+    });
+
+    let created = 0;
+
+    for (const invoice of invoices) {
+      const existing = await this.prisma.complianceDocument.findFirst({
+        where: {
+          organizationId,
+          salesInvoiceId: invoice.id
+        }
+      });
+
+      if (existing) continue;
+
+      const previousDocument = await this.prisma.complianceDocument.findFirst({
+        where: {
+          organizationId
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      const previousHash = previousDocument?.currentHash ?? null;
+
+      const currentHash = createHash("sha256")
+        .update(
+          JSON.stringify({
+            organizationId,
+            salesInvoiceId: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            issueDate: invoice.issueDate.toISOString(),
+            total: invoice.total.toString(),
+            previousHash
+          })
+        )
+        .digest("hex");
+
+      await this.prisma.complianceDocument.create({
+        data: {
+          organizationId,
+          salesInvoiceId: invoice.id,
+          invoiceKind: invoice.complianceInvoiceKind,
+          uuid: randomUUID(),
+          qrPayload: "",
+          previousHash,
+          currentHash,
+          status: "DRAFT",
+          xmlContent: ""
+        }
+      });
+
+      created++;
+    }
+
+    return created;
+  }
+
+  private async persistCanonicalInvoices(
+    organizationId: string,
+    connectorAccountId: string,
+    invoices: CanonicalImportBundle["invoices"],
+    contactIdsByExternalId: Map<string, string>
+  ) {
+    let persistedInvoices = 0;
+
+    for (const invoice of invoices) {
+      const contactId = await this.resolveImportedInvoiceContact(
+        organizationId,
+        connectorAccountId,
+        invoice,
+        contactIdsByExternalId
+      );
+
+      const issueDate = new Date(invoice.issueDate);
+      const dueDate = invoice.dueDate ? new Date(invoice.dueDate) : issueDate;
+
+      const subtotal = this.toMoney(invoice.subtotal);
+      const taxTotal = this.toMoney(invoice.taxTotal);
+      const total = this.toMoney(invoice.total);
+
+      const balanceValue =
+        typeof invoice.balance === "number" ? invoice.balance : invoice.total;
+
+      const amountDue = this.toMoney(balanceValue);
+      const amountPaid = this.toMoney(
+        Math.max(0, Number(invoice.total) - Number(balanceValue))
+      );
+
+      const status = this.mapImportedInvoiceStatus(
+        invoice.status,
+        balanceValue,
+        invoice.total
+      );
+
+      const lineInputs = await Promise.all(
+        invoice.lines.map(async (line, index) => {
+          const lineSubtotal = this.toMoney(line.lineAmountExclusive);
+          const lineTax = this.toMoney(
+            typeof line.taxAmount === "number"
+              ? line.taxAmount
+              : typeof line.lineAmountInclusive === "number"
+                ? line.lineAmountInclusive - line.lineAmountExclusive
+                : 0
+          );
+          const lineTotal = this.toMoney(
+            Number(lineSubtotal) + Number(lineTax)
+          );
+
+          const taxRate = await this.findMatchingTaxRate(
+            organizationId,
+            line.taxCode ?? null,
+            typeof line.taxRate === "number" ? line.taxRate : null
+          );
+
+          return {
+            description: line.description.trim() || "Imported line item",
+            quantity: this.toMoney(line.quantity),
+            unitPrice: this.toMoney(line.unitPrice),
+            taxRateId: taxRate?.id ?? null,
+            taxRateName: taxRate?.name ?? line.taxCode ?? null,
+            taxRatePercent: this.toMoney(
+              taxRate ? Number(taxRate.rate) : (line.taxRate ?? 0)
+            ),
+            lineSubtotal,
+            lineTax,
+            lineTotal,
+            sortOrder: index
+          };
+        })
+      );
+
+      let existing = null as Awaited<
+        ReturnType<typeof this.prisma.salesInvoice.findFirst>
+      >;
+
+      if (invoice.externalId) {
+        existing = await this.prisma.salesInvoice.findUnique({
+          where: {
+            organizationId_sourceProvider_sourceExternalId: {
+              organizationId,
+              sourceProvider: invoice.provider,
+              sourceExternalId: invoice.externalId
+            }
+          }
+        });
+      }
+
+      if (!existing) {
+        existing = await this.prisma.salesInvoice.findUnique({
+          where: {
+            organizationId_invoiceNumber: {
+              organizationId,
+              invoiceNumber: invoice.documentNumber
+            }
+          }
+        });
+      }
+
+      if (existing) {
+        await this.prisma.$transaction([
+          this.prisma.salesInvoiceLine.deleteMany({
+            where: {
+              salesInvoiceId: existing.id
+            }
+          }),
+          this.prisma.salesInvoice.update({
+            where: {
+              id: existing.id
+            },
+            data: {
+              contactId,
+              invoiceNumber: invoice.documentNumber,
+              status,
+              complianceInvoiceKind: "STANDARD",
+              issueDate,
+              dueDate,
+              currencyCode: invoice.currency,
+              notes: `Imported from ${invoice.provider} connector ${connectorAccountId}`,
+              subtotal,
+              taxTotal,
+              total,
+              amountPaid,
+              amountDue,
+              sourceConnectorAccountId: connectorAccountId,
+              sourceExternalId: invoice.externalId,
+              sourcePayload: invoice.raw as Prisma.InputJsonValue,
+              sourceProvider: invoice.provider,
+              lines: {
+                create: lineInputs
+              }
+            }
+          })
+        ]);
+      } else {
+        await this.prisma.salesInvoice.create({
+          data: {
+            organizationId,
+            contactId,
+            invoiceNumber: invoice.documentNumber,
+            status,
+            complianceInvoiceKind: "STANDARD",
+            issueDate,
+            dueDate,
+            currencyCode: invoice.currency,
+            notes: `Imported from ${invoice.provider} connector ${connectorAccountId}`,
+            subtotal,
+            taxTotal,
+            total,
+            amountPaid,
+            amountDue,
+            sourceConnectorAccountId: connectorAccountId,
+            sourceExternalId: invoice.externalId,
+            sourcePayload: invoice.raw as Prisma.InputJsonValue,
+            sourceProvider: invoice.provider,
+            lines: {
+              create: lineInputs
+            }
+          }
+        });
+      }
+
+      persistedInvoices += 1;
+    }
+
+    return persistedInvoices;
+  }
+
+  private async upsertImportedContact(
+    organizationId: string,
+    connectorAccountId: string,
+    contact: CanonicalImportBundle["contacts"][number]
+  ) {
+    const displayName = contact.displayName.trim();
+
+    if (!displayName) {
+      throw new Error("Imported contact display name is required.");
+    }
+
+    const existing = await this.prisma.contact.findFirst({
+      where: {
+        organizationId,
+        displayName
+      },
+      orderBy: {
+        createdAt: "asc"
+      }
+    });
+
+    let contactId: string;
+
+    if (existing) {
+      const updated = await this.prisma.contact.update({
+        where: { id: existing.id },
+        data: {
+          companyName: existing.companyName ?? displayName,
+          email: contact.email ?? existing.email ?? undefined,
+          taxNumber: contact.taxNumber ?? existing.taxNumber ?? undefined,
+          isCustomer: true,
+          isSupplier: false,
+          currencyCode: existing.currencyCode ?? contact.currencyCode ?? undefined,
+          notes: `Imported from connector ${connectorAccountId}`
+        }
+      });
+
+      contactId = updated.id;
+    } else {
+      const created = await this.prisma.contact.create({
+        data: {
+          organizationId,
+          displayName,
+          companyName: displayName,
+          email: contact.email ?? undefined,
+          taxNumber: contact.taxNumber ?? undefined,
+          isCustomer: true,
+          isSupplier: false,
+          currencyCode: contact.currencyCode ?? undefined,
+          notes: `Imported from connector ${connectorAccountId}`
+        }
+      });
+
+      contactId = created.id;
+    }
+
+    const phoneNumber = contact.phone?.trim();
+
+    if (phoneNumber) {
+      const existingNumber = await this.prisma.contactNumber.findFirst({
+        where: {
+          contactId,
+          phoneNumber
+        }
+      });
+
+      if (!existingNumber) {
+        await this.prisma.contactNumber.create({
+          data: {
+            contactId,
+            label: "Primary",
+            phoneNumber
+          }
+        });
+      }
+    }
+
+    return contactId;
+  }
 
   private getAdapter(provider: ConnectorProvider) {
     const adapter = this.adapters.get(provider);
