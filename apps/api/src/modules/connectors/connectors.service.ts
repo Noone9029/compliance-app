@@ -595,68 +595,70 @@ export class ConnectorsService {
     return created.id;
   }
 
-  private generateInvoiceXml(invoice: any, doc: any) {
-    return `
-  <Invoice>
-    <UUID>${doc.uuid}</UUID>
-    <InvoiceNumber>${invoice.invoiceNumber}</InvoiceNumber>
-    <IssueDate>${invoice.issueDate.toISOString()}</IssueDate>
-
-    <AccountingCustomerParty>
-      <Name>${invoice.contact?.displayName ?? "Customer"}</Name>
-    </AccountingCustomerParty>
-
-    <LegalMonetaryTotal>
-      <PayableAmount currencyID="${invoice.currencyCode}">
-        ${invoice.total.toString()}
-      </PayableAmount>
-    </LegalMonetaryTotal>
-
-    <InvoiceLines>
-      ${invoice.lines
-        .map(
-          (line: any) => `
-        <Line>
-          <Description>${line.description}</Description>
-          <Quantity>${line.quantity}</Quantity>
-          <UnitPrice>${line.unitPrice}</UnitPrice>
-          <LineTotal>${line.lineTotal}</LineTotal>
-        </Line>
-      `
-        )
-        .join("")}
-    </InvoiceLines>
-  </Invoice>
-  `;
-  }
-
   private async generateXmlForComplianceDocuments(
     organizationId: string,
     connectorAccountId: string
   ) {
+    const organization = await this.prisma.organization.findUnique({
+      where: { id: organizationId },
+      include: {
+        taxDetail: true
+      }
+    });
+
+    if (!organization) {
+      throw new Error("Organization not found");
+    }
+
     const docs = await this.prisma.complianceDocument.findMany({
       where: {
         organizationId,
-        xmlContent: ""
+        status: "DRAFT",
+        salesInvoice: {
+          sourceConnectorAccountId: connectorAccountId
+        }
       },
       include: {
         salesInvoice: {
           include: {
-            lines: true,
-            contact: true
+            contact: {
+              include: {
+                addresses: true
+              }
+            },
+            lines: true
           }
         }
+      },
+      orderBy: {
+        createdAt: "asc"
       }
     });
 
     let generated = 0;
 
     for (const doc of docs) {
-      const xml = this.generateInvoiceXml(doc.salesInvoice, doc);
+      const qrPayload = this.buildQrPayload({
+        sellerName:
+          organization.taxDetail?.legalName?.trim() ||
+          organization.name.trim(),
+        vatNumber: organization.taxDetail?.taxNumber?.trim() || "",
+        timestamp: doc.salesInvoice.issueDate,
+        invoiceTotal: Number(doc.salesInvoice.total),
+        vatTotal: Number(doc.salesInvoice.taxTotal)
+      });
+
+      const xml = this.generateInvoiceXml(
+        organization,
+        doc.salesInvoice,
+        doc,
+        qrPayload
+      );
 
       await this.prisma.complianceDocument.update({
         where: { id: doc.id },
         data: {
+          qrPayload,
           xmlContent: xml,
           status: "READY"
         }
@@ -666,6 +668,285 @@ export class ConnectorsService {
     }
 
     return generated;
+  }
+
+  private generateInvoiceXml(
+    organization: {
+      name: string;
+      taxDetail: {
+        legalName: string;
+        taxNumber: string;
+        addressLine1: string | null;
+        addressLine2: string | null;
+        city: string | null;
+        postalCode: string | null;
+        countryCode: string;
+        registrationNumber: string | null;
+      } | null;
+    },
+    invoice: {
+      invoiceNumber: string;
+      issueDate: Date;
+      dueDate: Date;
+      currencyCode: string;
+      notes: string | null;
+      subtotal: Prisma.Decimal;
+      taxTotal: Prisma.Decimal;
+      total: Prisma.Decimal;
+      amountPaid: Prisma.Decimal;
+      amountDue: Prisma.Decimal;
+      complianceInvoiceKind: "STANDARD" | "SIMPLIFIED";
+      contact: {
+        displayName: string;
+        companyName: string | null;
+        taxNumber: string | null;
+        addresses: Array<{
+          line1: string;
+          line2: string | null;
+          city: string | null;
+          postalCode: string | null;
+          countryCode: string;
+        }>;
+      };
+      lines: Array<{
+        id: string;
+        description: string;
+        quantity: Prisma.Decimal;
+        unitPrice: Prisma.Decimal;
+        lineSubtotal: Prisma.Decimal;
+        lineTax: Prisma.Decimal;
+        lineTotal: Prisma.Decimal;
+        taxRatePercent: Prisma.Decimal;
+        taxRateName: string | null;
+      }>;
+    },
+    doc: {
+      uuid: string;
+      previousHash: string | null;
+      currentHash: string;
+    },
+    qrPayload: string
+  ) {
+    const sellerName =
+      organization.taxDetail?.legalName?.trim() ||
+      organization.name.trim();
+
+    const sellerVat = organization.taxDetail?.taxNumber?.trim() || "";
+    const sellerAddress1 = organization.taxDetail?.addressLine1?.trim() || "";
+    const sellerAddress2 = organization.taxDetail?.addressLine2?.trim() || "";
+    const sellerCity = organization.taxDetail?.city?.trim() || "";
+    const sellerPostal = organization.taxDetail?.postalCode?.trim() || "";
+    const sellerCountry = organization.taxDetail?.countryCode?.trim() || "SA";
+    const sellerRegistration =
+      organization.taxDetail?.registrationNumber?.trim() || "";
+
+    const buyerAddress = invoice.contact.addresses[0];
+    const buyerName =
+      invoice.contact.companyName?.trim() || invoice.contact.displayName.trim();
+    const buyerVat = invoice.contact.taxNumber?.trim() || "";
+    const buyerAddress1 = buyerAddress?.line1?.trim() || "";
+    const buyerAddress2 = buyerAddress?.line2?.trim() || "";
+    const buyerCity = buyerAddress?.city?.trim() || "";
+    const buyerPostal = buyerAddress?.postalCode?.trim() || "";
+    const buyerCountry = buyerAddress?.countryCode?.trim() || "SA";
+
+    const issueDate = this.formatDate(invoice.issueDate);
+    const issueTime = this.formatTime(invoice.issueDate);
+    const dueDate = this.formatDate(invoice.dueDate);
+
+    const invoiceTypeCode =
+      invoice.complianceInvoiceKind === "SIMPLIFIED" ? "0200000" : "0100000";
+
+    const lineXml = invoice.lines
+      .map((line, index) => {
+        const quantity = this.formatDecimal(line.quantity);
+        const unitPrice = this.formatDecimal(line.unitPrice);
+        const lineSubtotal = this.formatDecimal(line.lineSubtotal);
+        const lineTax = this.formatDecimal(line.lineTax);
+        const lineTotal = this.formatDecimal(line.lineTotal);
+        const taxPercent = this.formatDecimal(line.taxRatePercent);
+
+        return `
+    <cac:InvoiceLine>
+      <cbc:ID>${index + 1}</cbc:ID>
+      <cbc:InvoicedQuantity unitCode="PCE">${quantity}</cbc:InvoicedQuantity>
+      <cbc:LineExtensionAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineSubtotal}</cbc:LineExtensionAmount>
+      <cac:TaxTotal>
+        <cbc:TaxAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineTax}</cbc:TaxAmount>
+        <cbc:RoundingAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineTotal}</cbc:RoundingAmount>
+      </cac:TaxTotal>
+      <cac:Item>
+        <cbc:Name>${this.escapeXml(line.description || "Item")}</cbc:Name>
+        <cac:ClassifiedTaxCategory>
+          <cbc:ID>S</cbc:ID>
+          <cbc:Percent>${taxPercent}</cbc:Percent>
+          <cac:TaxScheme>
+            <cbc:ID>VAT</cbc:ID>
+          </cac:TaxScheme>
+        </cac:ClassifiedTaxCategory>
+      </cac:Item>
+      <cac:Price>
+        <cbc:PriceAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${unitPrice}</cbc:PriceAmount>
+      </cac:Price>
+    </cac:InvoiceLine>`.trim();
+      })
+      .join("\n");
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+  <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
+          xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+          xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
+          xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">
+    <ext:UBLExtensions>
+      <ext:UBLExtension>
+        <ext:ExtensionContent>
+          <PreviousInvoiceHash>${this.escapeXml(doc.previousHash || "")}</PreviousInvoiceHash>
+          <InvoiceHash>${this.escapeXml(doc.currentHash)}</InvoiceHash>
+          <QRCode>${this.escapeXml(qrPayload)}</QRCode>
+        </ext:ExtensionContent>
+      </ext:UBLExtension>
+    </ext:UBLExtensions>
+
+    <cbc:ProfileID>reporting:1.0</cbc:ProfileID>
+    <cbc:ID>${this.escapeXml(invoice.invoiceNumber)}</cbc:ID>
+    <cbc:UUID>${this.escapeXml(doc.uuid)}</cbc:UUID>
+    <cbc:IssueDate>${issueDate}</cbc:IssueDate>
+    <cbc:IssueTime>${issueTime}</cbc:IssueTime>
+    <cbc:DueDate>${dueDate}</cbc:DueDate>
+    <cbc:InvoiceTypeCode name="${invoice.complianceInvoiceKind}">${invoiceTypeCode}</cbc:InvoiceTypeCode>
+    <cbc:DocumentCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:DocumentCurrencyCode>
+    <cbc:TaxCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:TaxCurrencyCode>
+
+    ${
+      invoice.notes?.trim()
+        ? `<cbc:Note>${this.escapeXml(invoice.notes.trim())}</cbc:Note>`
+        : ""
+    }
+
+    <cac:AdditionalDocumentReference>
+      <cbc:ID>QR</cbc:ID>
+      <cac:Attachment>
+        <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${this.escapeXml(qrPayload)}</cbc:EmbeddedDocumentBinaryObject>
+      </cac:Attachment>
+    </cac:AdditionalDocumentReference>
+
+    <cac:AccountingSupplierParty>
+      <cac:Party>
+        <cac:PartyIdentification>
+          <cbc:ID schemeID="VAT">${this.escapeXml(sellerVat)}</cbc:ID>
+        </cac:PartyIdentification>
+        ${
+          sellerRegistration
+            ? `<cac:PartyIdentification><cbc:ID schemeID="CRN">${this.escapeXml(sellerRegistration)}</cbc:ID></cac:PartyIdentification>`
+            : ""
+        }
+        <cac:PostalAddress>
+          <cbc:StreetName>${this.escapeXml(sellerAddress1)}</cbc:StreetName>
+          <cbc:AdditionalStreetName>${this.escapeXml(sellerAddress2)}</cbc:AdditionalStreetName>
+          <cbc:CityName>${this.escapeXml(sellerCity)}</cbc:CityName>
+          <cbc:PostalZone>${this.escapeXml(sellerPostal)}</cbc:PostalZone>
+          <cac:Country>
+            <cbc:IdentificationCode>${this.escapeXml(sellerCountry)}</cbc:IdentificationCode>
+          </cac:Country>
+        </cac:PostalAddress>
+        <cac:PartyTaxScheme>
+          <cbc:CompanyID>${this.escapeXml(sellerVat)}</cbc:CompanyID>
+          <cac:TaxScheme>
+            <cbc:ID>VAT</cbc:ID>
+          </cac:TaxScheme>
+        </cac:PartyTaxScheme>
+        <cac:PartyLegalEntity>
+          <cbc:RegistrationName>${this.escapeXml(sellerName)}</cbc:RegistrationName>
+        </cac:PartyLegalEntity>
+      </cac:Party>
+    </cac:AccountingSupplierParty>
+
+    <cac:AccountingCustomerParty>
+      <cac:Party>
+        ${
+          buyerVat
+            ? `<cac:PartyIdentification><cbc:ID schemeID="VAT">${this.escapeXml(buyerVat)}</cbc:ID></cac:PartyIdentification>`
+            : ""
+        }
+        <cac:PostalAddress>
+          <cbc:StreetName>${this.escapeXml(buyerAddress1)}</cbc:StreetName>
+          <cbc:AdditionalStreetName>${this.escapeXml(buyerAddress2)}</cbc:AdditionalStreetName>
+          <cbc:CityName>${this.escapeXml(buyerCity)}</cbc:CityName>
+          <cbc:PostalZone>${this.escapeXml(buyerPostal)}</cbc:PostalZone>
+          <cac:Country>
+            <cbc:IdentificationCode>${this.escapeXml(buyerCountry)}</cbc:IdentificationCode>
+          </cac:Country>
+        </cac:PostalAddress>
+        <cac:PartyLegalEntity>
+          <cbc:RegistrationName>${this.escapeXml(buyerName)}</cbc:RegistrationName>
+        </cac:PartyLegalEntity>
+      </cac:Party>
+    </cac:AccountingCustomerParty>
+
+    <cac:TaxTotal>
+      <cbc:TaxAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.taxTotal)}</cbc:TaxAmount>
+    </cac:TaxTotal>
+
+    <cac:LegalMonetaryTotal>
+      <cbc:LineExtensionAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:LineExtensionAmount>
+      <cbc:TaxExclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:TaxExclusiveAmount>
+      <cbc:TaxInclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.total)}</cbc:TaxInclusiveAmount>
+      <cbc:PrepaidAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.amountPaid)}</cbc:PrepaidAmount>
+      <cbc:PayableAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.amountDue)}</cbc:PayableAmount>
+    </cac:LegalMonetaryTotal>
+
+  ${lineXml}
+  </Invoice>`;
+  }
+
+  private buildQrPayload(input: {
+    sellerName: string;
+    vatNumber: string;
+    timestamp: Date;
+    invoiceTotal: number;
+    vatTotal: number;
+  }) {
+    const fields = [
+      input.sellerName,
+      input.vatNumber,
+      input.timestamp.toISOString(),
+      input.invoiceTotal.toFixed(2),
+      input.vatTotal.toFixed(2)
+    ];
+
+    const buffers: Buffer[] = [];
+
+    fields.forEach((value, index) => {
+      const valueBuffer = Buffer.from(value, "utf8");
+      buffers.push(
+        Buffer.from([index + 1]),
+        Buffer.from([valueBuffer.length]),
+        valueBuffer
+      );
+    });
+
+    return Buffer.concat(buffers).toString("base64");
+  }
+
+  private formatDate(value: Date) {
+    return value.toISOString().slice(0, 10);
+  }
+
+  private formatTime(value: Date) {
+    return value.toISOString().slice(11, 19);
+  }
+
+  private formatDecimal(value: Prisma.Decimal | number | string) {
+    return new Prisma.Decimal(value).toFixed(2);
+  }
+
+  private escapeXml(value: string) {
+    return value
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&apos;");
   }
 
   private async createComplianceDocumentsForInvoices(
