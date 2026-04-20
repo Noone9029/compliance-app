@@ -269,6 +269,21 @@ export class ConnectorsService {
         connectorAccountId
       );
 
+      const queued = await this.queueComplianceDocuments(
+        organizationId,
+        connectorAccountId
+      );
+
+      const submitted = await this.submitQueuedDocuments(
+        organizationId,
+        connectorAccountId
+      );
+
+      const finalized = await this.finalizeSubmittedDocuments(
+        organizationId,
+        connectorAccountId
+      );
+      
       await this.prisma.connectorAccount.update({
         where: { id: connectorAccountId },
         data: {
@@ -284,7 +299,7 @@ export class ConnectorsService {
           scope: "FULL",
           status: "SUCCESS",
           retryable: false,
-          startedAt: new Date(),
+          startedAt,
           finishedAt: new Date(),
           metadata: {
             mode: "quickbooks-live",
@@ -307,6 +322,9 @@ export class ConnectorsService {
         },
         complianceDocumentsCreated: complianceDocsCreated,
         xmlGenerated,
+        queued,
+        submitted,
+        finalized,
         log
       };
 
@@ -399,7 +417,20 @@ export class ConnectorsService {
         organizationId,
         connectorAccountId
       );
+    const queued = await this.queueComplianceDocuments(
+      organizationId,
+      connectorAccountId
+    );
 
+    const submitted = await this.submitQueuedDocuments(
+      organizationId,
+      connectorAccountId
+    );
+
+    const finalized = await this.finalizeSubmittedDocuments(
+      organizationId,
+      connectorAccountId
+    );
     return {
       ok: true,
       mode: "bootstrap",
@@ -410,7 +441,10 @@ export class ConnectorsService {
         invoices: summary.invoices
       },
       complianceDocumentsCreated: complianceDocsCreated,
-      xmlGenerated
+      xmlGenerated,
+      queued,
+      submitted,
+      finalized
     };
   }
 
@@ -480,7 +514,108 @@ export class ConnectorsService {
   /* =========================
      HELPERS
   ========================= */
+  private async queueComplianceDocuments(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        organizationId,
+        status: "READY",
+        salesInvoice: {
+          sourceConnectorAccountId: connectorAccountId
+        }
+      }
+    });
 
+    let queued = 0;
+
+    for (const doc of docs) {
+      await this.prisma.complianceDocument.update({
+        where: { id: doc.id },
+        data: {
+          status: "QUEUED"
+        }
+      });
+
+      queued++;
+    }
+
+    return queued;
+  }
+
+  private async submitQueuedDocuments(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        organizationId,
+        status: "QUEUED",
+        salesInvoice: {
+          sourceConnectorAccountId: connectorAccountId
+        }
+      }
+    });
+
+    let submitted = 0;
+
+    for (const doc of docs) {
+      await new Promise((r) => setTimeout(r, 50));
+
+      await this.prisma.complianceDocument.update({
+        where: { id: doc.id },
+        data: {
+          status: "PROCESSING"
+        }
+      });
+
+      submitted++;
+    }
+
+    return submitted;
+  }
+
+  private async finalizeSubmittedDocuments(
+    organizationId: string,
+    connectorAccountId: string
+  ) {
+    const docs = await this.prisma.complianceDocument.findMany({
+      where: {
+        organizationId,
+        status: "PROCESSING",
+        salesInvoice: {
+          sourceConnectorAccountId: connectorAccountId
+        }
+      },
+      include: {
+        salesInvoice: true
+      }
+    });
+
+    let finalized = 0;
+
+    for (const doc of docs) {
+      const isAccepted = Math.random() > 0.1;
+
+      const finalStatus = isAccepted
+        ? doc.salesInvoice.complianceInvoiceKind === "STANDARD"
+          ? "CLEARED"
+          : "REPORTED"
+        : "REJECTED";
+
+      await this.prisma.complianceDocument.update({
+        where: { id: doc.id },
+        data: {
+          status: finalStatus
+        }
+      });
+
+      finalized++;
+    }
+
+    return finalized;
+  }
 
   private mapImportedInvoiceStatus(
     sourceStatus: string,
@@ -754,8 +889,9 @@ export class ConnectorsService {
     const issueTime = this.formatTime(invoice.issueDate);
     const dueDate = this.formatDate(invoice.dueDate);
 
-    const invoiceTypeCode =
+    const invoiceTypeName =
       invoice.complianceInvoiceKind === "SIMPLIFIED" ? "0200000" : "0100000";
+    const invoiceTypeCode = "388";
 
     const lineXml = invoice.lines
       .map((line, index) => {
@@ -813,7 +949,7 @@ export class ConnectorsService {
     <cbc:IssueDate>${issueDate}</cbc:IssueDate>
     <cbc:IssueTime>${issueTime}</cbc:IssueTime>
     <cbc:DueDate>${dueDate}</cbc:DueDate>
-    <cbc:InvoiceTypeCode name="${invoice.complianceInvoiceKind}">${invoiceTypeCode}</cbc:InvoiceTypeCode>
+    <cbc:InvoiceTypeCode name="${invoiceTypeName}">${invoiceTypeCode}</cbc:InvoiceTypeCode>
     <cbc:DocumentCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:DocumentCurrencyCode>
     <cbc:TaxCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:TaxCurrencyCode>
 
@@ -891,7 +1027,6 @@ export class ConnectorsService {
       <cbc:LineExtensionAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:LineExtensionAmount>
       <cbc:TaxExclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:TaxExclusiveAmount>
       <cbc:TaxInclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.total)}</cbc:TaxInclusiveAmount>
-      <cbc:PrepaidAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.amountPaid)}</cbc:PrepaidAmount>
       <cbc:PayableAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.amountDue)}</cbc:PayableAmount>
     </cac:LegalMonetaryTotal>
 
