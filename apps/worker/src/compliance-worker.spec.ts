@@ -48,6 +48,7 @@ describe.sequential("worker compliance processing", () => {
   async function seedQueuedSubmission(input: {
     invoiceId: string;
     invoiceNumber: string;
+    enqueue?: boolean;
   }) {
     const invoice = await prisma.salesInvoice.findUniqueOrThrow({
       where: { id: input.invoiceId },
@@ -58,6 +59,16 @@ describe.sequential("worker compliance processing", () => {
           },
         },
         contact: true,
+      },
+    });
+    await prisma.reportedDocument.deleteMany({
+      where: {
+        salesInvoiceId: invoice.id,
+      },
+    });
+    await prisma.complianceDocument.deleteMany({
+      where: {
+        salesInvoiceId: invoice.id,
       },
     });
     const onboarding = await prisma.complianceOnboarding.findFirstOrThrow({
@@ -127,13 +138,16 @@ describe.sequential("worker compliance processing", () => {
       },
     });
 
-    await enqueueComplianceSubmission({
-      submissionId: submission.id,
-    });
+    if (input.enqueue !== false) {
+      await enqueueComplianceSubmission({
+        submissionId: submission.id,
+      });
+    }
 
     return {
       document,
       submission,
+      onboardingId: onboarding.id,
     };
   }
 
@@ -209,5 +223,75 @@ describe.sequential("worker compliance processing", () => {
 
     expect(stored.status).toBe("REJECTED");
     expect(stored.attempts[0]?.failureCategory).toBe("ZATCA_REJECTION");
+  });
+
+  it("fails queued submissions when onboarding is no longer active in the worker path", async () => {
+    const invoice = await prisma.salesInvoice.findFirstOrThrow({
+      where: {
+        invoiceNumber: "INV-NE-0001",
+      },
+    });
+    const seeded = await seedQueuedSubmission({
+      invoiceId: invoice.id,
+      invoiceNumber: `${invoice.invoiceNumber}-WORKER-GUARD`,
+      enqueue: false,
+    });
+    const onboardingBefore = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: seeded.onboardingId },
+      select: {
+        status: true,
+        certificateStatus: true,
+      },
+    });
+
+    try {
+      await prisma.complianceOnboarding.update({
+        where: { id: seeded.onboardingId },
+        data: {
+          status: "DRAFT",
+          certificateStatus: "CSR_GENERATED",
+        },
+      });
+
+      await enqueueComplianceSubmission({
+        submissionId: seeded.submission.id,
+      });
+      await waitForStatus(invoice.id, "FAILED");
+
+      const stored = await prisma.zatcaSubmission.findUniqueOrThrow({
+        where: { id: seeded.submission.id },
+        include: {
+          attempts: {
+            orderBy: { attemptNumber: "desc" },
+          },
+        },
+      });
+      const document = await prisma.complianceDocument.findUniqueOrThrow({
+        where: {
+          salesInvoiceId: invoice.id,
+        },
+        select: {
+          status: true,
+          lastError: true,
+          failureCategory: true,
+        },
+      });
+
+      expect(document.status).toBe("FAILED");
+      expect(document.lastError).toBe(
+        "Compliance onboarding is not active for this organization/device.",
+      );
+      expect(document.failureCategory).toBe("CONFIGURATION");
+      expect(stored.status).toBe("FAILED");
+      expect(stored.attempts[0]?.failureCategory).toBe("CONFIGURATION");
+    } finally {
+      await prisma.complianceOnboarding.update({
+        where: { id: seeded.onboardingId },
+        data: {
+          status: onboardingBefore.status,
+          certificateStatus: onboardingBefore.certificateStatus,
+        },
+      });
+    }
   });
 });

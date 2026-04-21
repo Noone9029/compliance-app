@@ -45,7 +45,8 @@ export class QuickBooksTransport implements ConnectorProviderTransport {
     return this.exchangeToken({
       grantType: "authorization_code",
       code: input.code,
-      redirectUri: input.redirectUri
+      redirectUri: input.redirectUri,
+      externalTenantId: input.externalTenantId
     });
   }
 
@@ -63,6 +64,7 @@ export class QuickBooksTransport implements ConnectorProviderTransport {
     code?: string;
     refreshToken?: string;
     redirectUri?: string;
+    externalTenantId?: string | null;
   }): Promise<ConnectorTokenSet> {
     const env = loadEnv();
     const basic = Buffer.from(
@@ -108,7 +110,7 @@ export class QuickBooksTransport implements ConnectorProviderTransport {
       refreshToken: data.refresh_token,
       expiresAt,
       scopes: data.scope ? data.scope.split(" ").filter(Boolean) : [],
-      externalTenantId: null,
+      externalTenantId: input.externalTenantId?.trim() || null,
       displayName: "QuickBooks",
       raw: data as Record<string, unknown>
     };

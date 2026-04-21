@@ -8,6 +8,13 @@ import type {
 
 import { loadEnv, type DaftarEnv } from "@daftar/config";
 
+export type ComplianceTransportCredentials = {
+  clientId: string;
+  clientSecret: string;
+  certificatePem?: string | null;
+  certificateSecret?: string | null;
+};
+
 export type ComplianceTransportRequest = {
   flow: ComplianceSubmissionFlow;
   invoiceId: string;
@@ -21,6 +28,7 @@ export type ComplianceTransportRequest = {
     csid: string | null;
     certificateId: string | null;
   } | null;
+  credentials: ComplianceTransportCredentials | null;
 };
 
 export type ComplianceTransportResponse = {
@@ -60,12 +68,31 @@ export interface ComplianceTransportClient {
   submit(request: ComplianceTransportRequest): Promise<ComplianceTransportResponse>;
 }
 
-export function hasConfiguredZatcaCredentials(env = loadEnv()) {
-  return (
-    env.ZATCA_CLIENT_ID !== "placeholder" &&
-    env.ZATCA_CLIENT_SECRET !== "placeholder" &&
-    !env.ZATCA_BASE_URL.includes("sandbox.example")
-  );
+export function isConfiguredComplianceCredentials(
+  credentials?: ComplianceTransportCredentials | null,
+) {
+  if (!credentials) {
+    return false;
+  }
+
+  return Boolean(credentials.clientId && credentials.clientSecret);
+}
+
+export function fallbackComplianceTransportCredentialsFromEnv(
+  env = loadEnv(),
+): ComplianceTransportCredentials | null {
+  if (
+    env.ZATCA_CLIENT_ID === "placeholder" ||
+    env.ZATCA_CLIENT_SECRET === "placeholder" ||
+    env.ZATCA_BASE_URL.includes("sandbox.example")
+  ) {
+    return null;
+  }
+
+  return {
+    clientId: env.ZATCA_CLIENT_ID,
+    clientSecret: env.ZATCA_CLIENT_SECRET,
+  };
 }
 
 export function fingerprintSecret(secret: string) {
@@ -136,7 +163,10 @@ class TestComplianceTransportClient implements ComplianceTransportClient {
 }
 
 class LiveComplianceTransportClient implements ComplianceTransportClient {
-  constructor(private readonly env: DaftarEnv) {}
+  constructor(
+    private readonly env: DaftarEnv,
+    private readonly fallbackCredentials: ComplianceTransportCredentials | null,
+  ) {}
 
   endpointFor(flow: ComplianceSubmissionFlow) {
     return flow === "CLEARANCE"
@@ -145,9 +175,10 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
   }
 
   async submit(request: ComplianceTransportRequest): Promise<ComplianceTransportResponse> {
-    if (!hasConfiguredZatcaCredentials(this.env)) {
+    const credentials = request.credentials ?? this.fallbackCredentials;
+    if (!credentials || !isConfiguredComplianceCredentials(credentials)) {
       throw new ComplianceTransportError({
-        message: "ZATCA sandbox credentials are not configured for this workspace.",
+        message: "Compliance transport credentials are not available for this onboarding.",
         category: "CONFIGURATION",
         retryable: false,
       });
@@ -157,7 +188,7 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
       method: "POST",
       headers: {
         authorization: `Basic ${Buffer.from(
-          `${this.env.ZATCA_CLIENT_ID}:${this.env.ZATCA_CLIENT_SECRET}`,
+          `${credentials.clientId}:${credentials.clientSecret}`,
         ).toString("base64")}`,
         "content-type": "application/json",
         accept: "application/json",
@@ -225,12 +256,14 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
   }
 }
 
-export function createComplianceTransportClient(
-  env = loadEnv(),
-): ComplianceTransportClient {
+export function createComplianceTransportClient(input?: {
+  env?: DaftarEnv;
+  fallbackCredentials?: ComplianceTransportCredentials | null;
+}): ComplianceTransportClient {
+  const env = input?.env ?? loadEnv();
   if (env.NODE_ENV === "test") {
     return new TestComplianceTransportClient();
   }
 
-  return new LiveComplianceTransportClient(env);
+  return new LiveComplianceTransportClient(env, input?.fallbackCredentials ?? null);
 }

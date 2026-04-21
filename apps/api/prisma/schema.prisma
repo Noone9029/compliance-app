@@ -439,11 +439,31 @@ model ConnectorAccount {
   metadata          Json?
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
+  credential        ConnectorCredential?
   connectedByUser   User?                  @relation("ConnectorAccountConnectedBy", fields: [connectedByUserId], references: [id])
   organization      Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   syncLogs          ConnectorSyncLog[]
 
   @@unique([organizationId, provider])
+}
+
+model ConnectorCredential {
+  id                   String            @id @default(cuid())
+  connectorAccountId   String            @unique
+  provider             ConnectorProvider
+  accessTokenEncrypted String            @db.Text
+  refreshTokenEncrypted String           @db.Text
+  expiresAt            DateTime
+  tokenType            String?
+  scopeSnapshot        Json?
+  credentialMetadata   Json?
+  rotationCount        Int               @default(0)
+  lastRotatedAt        DateTime?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  connectorAccount     ConnectorAccount  @relation(fields: [connectorAccountId], references: [id], onDelete: Cascade)
+
+  @@index([provider, expiresAt])
 }
 
 model ConnectorSyncLog {
@@ -921,15 +941,36 @@ model ComplianceOnboarding {
   environment          String
   deviceName           String
   deviceSerial         String
-  status               ComplianceOnboardingStatus  @default(NOT_STARTED)
+  status               ComplianceOnboardingStatus  @default(DRAFT)
   certificateStatus    ComplianceCertificateStatus @default(NOT_REQUESTED)
+  commonName           String?
+  egsSerialNumber      String?
+  organizationUnitName String?
+  organizationName     String?
+  countryCode          String?                     @default("SA")
+  vatNumber            String?
+  branchName           String?
+  locationAddress      String?
+  industry             String?
+  csrPem               String?
+  csrBase64            String?
+  privateKeyPem        String?
+  publicKeyPem         String?
+  otpCode              String?
+  otpReceivedAt        DateTime?
+  csrGeneratedAt       DateTime?
+  csrSubmittedAt       DateTime?
   csid                 String?
   certificateId        String?
+  certificatePem       String?
+  certificateBase64    String?
+  certificateSecret    String?
   secretFingerprint    String?
   certificateIssuedAt  DateTime?
   certificateExpiresAt DateTime?
   lastActivatedAt      DateTime?
   lastRenewedAt        DateTime?
+  zatcaRequestId       String?
   revokedAt            DateTime?
   lastError            String?
   metadata             Json?
@@ -1389,20 +1430,31 @@ enum SubmissionStatus {
 }
 
 enum ComplianceOnboardingStatus {
-  NOT_STARTED
-  PENDING_CONFIGURATION
+  DRAFT
+  CSR_GENERATED
+  OTP_PENDING
+  CSR_SUBMITTED
+  CERTIFICATE_ISSUED
   ACTIVE
+  RENEWAL_REQUIRED
   EXPIRED
   REVOKED
+  FAILED
+  NOT_STARTED
+  PENDING_CONFIGURATION
   ERROR
 }
 
 enum ComplianceCertificateStatus {
   NOT_REQUESTED
   CSR_GENERATED
+  OTP_PENDING
+  CSR_SUBMITTED
+  CERTIFICATE_ISSUED
   ACTIVE
   EXPIRED
   REVOKED
+  FAILED
   ERROR
 }
 

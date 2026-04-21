@@ -21,6 +21,7 @@ export type ConnectorCallbackInput = {
   userId: string;
   code: string;
   redirectUri: string;
+  externalTenantId?: string | null;
 };
 
 export type ConnectorTenantSummary = {

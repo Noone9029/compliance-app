@@ -26,7 +26,9 @@ const connectQuerySchema = z.object({
 const callbackBodySchema = z.object({
   code: z.string().min(1),
   state: z.string().min(1),
-  redirectUri: z.string().url()
+  redirectUri: z.string().url(),
+  realmId: z.string().min(1).optional(),
+  externalTenantId: z.string().min(1).optional()
 });
 
 const connectorSyncSchema = z.object({
@@ -83,7 +85,10 @@ export class ConnectorsController {
       organizationId: session!.organization!.id,
       userId: session!.user!.id,
       provider,
-      ...input
+      code: input.code,
+      state: input.state,
+      redirectUri: input.redirectUri,
+      externalTenantId: input.realmId ?? input.externalTenantId
     });
   }
 
@@ -125,6 +130,7 @@ export class ConnectorsController {
 
     return this.connectorsService.runSync(
       session!.organization!.id,
+      session!.user!.id,
       connectorAccountId,
       input
     );

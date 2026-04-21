@@ -298,6 +298,7 @@ async function clearDatabase(client: PrismaClient) {
   await client.quote.deleteMany();
   await client.storedFile.deleteMany();
   await client.connectorSyncLog.deleteMany();
+  await client.connectorCredential.deleteMany();
   await client.connectorAccount.deleteMany();
   await client.contactNumber.deleteMany();
   await client.address.deleteMany();
@@ -1443,10 +1444,28 @@ export async function seedDatabase(client: PrismaClient) {
         environment: "Sandbox",
         deviceName: `${organization.name} EGS Unit`,
         deviceSerial: `egs-${organization.slug}`,
+        commonName: `${organization.name} EGS Unit`,
+        egsSerialNumber: `egs-${organization.slug}`,
+        organizationUnitName: isPrimary ? "Riyadh Operations" : "Karachi Operations",
+        organizationName: organization.name,
+        countryCode: isPrimary ? "SA" : "PK",
+        vatNumber: isPrimary ? "300123456700003" : "310987654300003",
+        branchName: isPrimary ? "Riyadh HQ" : "Karachi HQ",
+        locationAddress: isPrimary ? "Olaya Street, Office 402, Riyadh" : "Clifton Block 8, Suite 12A, Karachi",
+        industry: isPrimary ? "Events" : "Software",
+        csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nseed-csr\n-----END CERTIFICATE REQUEST-----",
+        csrBase64: Buffer.from("seed-csr", "utf8").toString("base64"),
+        privateKeyPem: "-----BEGIN PRIVATE KEY-----\nseed-private-key\n-----END PRIVATE KEY-----",
+        publicKeyPem: "-----BEGIN PUBLIC KEY-----\nseed-public-key\n-----END PUBLIC KEY-----",
+        csrGeneratedAt: new Date("2026-03-31T09:00:00.000Z"),
+        csrSubmittedAt: new Date("2026-04-01T08:45:00.000Z"),
         status: "ACTIVE",
         certificateStatus: "ACTIVE",
         csid: `sandbox-${organization.slug}`,
         certificateId: `cert-${organization.slug}`,
+        certificatePem: "-----BEGIN CERTIFICATE-----\nseed-certificate\n-----END CERTIFICATE-----",
+        certificateBase64: Buffer.from("seed-certificate", "utf8").toString("base64"),
+        certificateSecret: `seed-secret-${organization.slug}`,
         secretFingerprint: `${organization.slug}-secret`,
         certificateIssuedAt: new Date("2026-04-01T09:00:00.000Z"),
         certificateExpiresAt: new Date("2027-04-01T09:00:00.000Z"),

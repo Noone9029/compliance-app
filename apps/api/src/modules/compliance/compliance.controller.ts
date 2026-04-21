@@ -29,6 +29,22 @@ const integrationSchema = z.object({
   ),
 });
 
+const prepareOnboardingSchema = z.object({
+  deviceSerial: z.string().min(1),
+  commonName: z.string().min(1),
+  organizationUnitName: z.string().min(1).optional(),
+  organizationName: z.string().min(1),
+  vatNumber: z.string().length(15),
+  branchName: z.string().min(1).optional(),
+  countryCode: z.string().min(2).max(3).optional(),
+  locationAddress: z.string().min(1).optional(),
+  industry: z.string().min(1).optional(),
+});
+
+const submitOtpSchema = z.object({
+  otpCode: z.string().min(6).max(12),
+});
+
 @Controller("v1/compliance")
 @UseGuards(AuthenticatedGuard)
 export class ComplianceController {
@@ -79,6 +95,110 @@ export class ComplianceController {
       result: "SUCCESS",
     });
     return integration;
+  }
+
+  @Post("onboarding/prepare")
+  async prepareOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.write");
+    const parsed = prepareOnboardingSchema.parse(body);
+    const onboarding = await this.complianceService.prepareOnboarding(
+      session!.organization!.id,
+      parsed,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.prepare",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Post("onboarding/:id/generate-csr")
+  async generateOnboardingCsr(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+  ) {
+    requirePermission(session, "compliance.write");
+    const onboarding = await this.complianceService.generateCsrForOnboarding(
+      session!.organization!.id,
+      onboardingId,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.generate_csr",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Post("onboarding/:id/request-otp")
+  async requestOnboardingOtp(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+  ) {
+    requirePermission(session, "compliance.write");
+    const onboarding = await this.complianceService.markOtpPending(
+      session!.organization!.id,
+      onboardingId,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.request_otp",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Post("onboarding/:id/submit-otp")
+  async submitOnboardingOtp(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.write");
+    const parsed = submitOtpSchema.parse(body);
+    const onboarding = await this.complianceService.submitOtp(
+      session!.organization!.id,
+      onboardingId,
+      parsed.otpCode,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.submit_otp",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Get("onboarding/:id")
+  getOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+  ) {
+    requirePermission(session, "compliance.read");
+    return this.complianceService.getOnboarding(
+      session!.organization!.id,
+      onboardingId,
+    );
   }
 
   @Post("integration/onboard")

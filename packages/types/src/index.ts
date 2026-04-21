@@ -188,11 +188,18 @@ export type ComplianceSubmissionFlow =
   (typeof complianceSubmissionFlows)[number];
 
 export const complianceOnboardingStatuses = [
-  "NOT_STARTED",
-  "PENDING_CONFIGURATION",
+  "DRAFT",
+  "CSR_GENERATED",
+  "OTP_PENDING",
+  "CSR_SUBMITTED",
+  "CERTIFICATE_ISSUED",
   "ACTIVE",
+  "RENEWAL_REQUIRED",
   "EXPIRED",
   "REVOKED",
+  "FAILED",
+  "NOT_STARTED",
+  "PENDING_CONFIGURATION",
   "ERROR",
 ] as const;
 
@@ -202,9 +209,13 @@ export type ComplianceOnboardingStatus =
 export const complianceCertificateStatuses = [
   "NOT_REQUESTED",
   "CSR_GENERATED",
+  "OTP_PENDING",
+  "CSR_SUBMITTED",
+  "CERTIFICATE_ISSUED",
   "ACTIVE",
   "EXPIRED",
   "REVOKED",
+  "FAILED",
   "ERROR",
 ] as const;
 
@@ -610,7 +621,6 @@ export type ConnectorAccountRecord = {
   scopes: string[];
   connectedAt: string | null;
   lastSyncedAt: string | null;
-  metadata: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -1171,6 +1181,20 @@ export type ComplianceOnboardingRecord = {
   deviceSerial: string;
   status: ComplianceOnboardingStatus;
   certificateStatus: ComplianceCertificateStatus;
+  commonName: string | null;
+  egsSerialNumber: string | null;
+  organizationUnitName: string | null;
+  organizationName: string | null;
+  countryCode: string | null;
+  vatNumber: string | null;
+  branchName: string | null;
+  locationAddress: string | null;
+  industry: string | null;
+  hasCsr: boolean;
+  hasCertificate: boolean;
+  csrGeneratedAt: string | null;
+  otpReceivedAt: string | null;
+  csrSubmittedAt: string | null;
   csid: string | null;
   certificateId: string | null;
   secretFingerprint: string | null;

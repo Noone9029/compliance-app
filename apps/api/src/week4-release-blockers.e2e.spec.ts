@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
+import { encodeConnectorState } from "./modules/connectors/connector-state";
 
 describe.sequential("Daftar Week 4 release blockers", () => {
   const env = loadEnv();
@@ -45,25 +46,21 @@ describe.sequential("Daftar Week 4 release blockers", () => {
     await prisma.$disconnect();
   });
 
-  it("exposes connector readiness data and blocks simulated transport actions", async () => {
+  it("exposes connector readiness data and follows the current connector guardrails", async () => {
     const cookies = await signIn("owner@daftar.local");
     await switchOrg(cookies, "nomad-events");
 
     const eventsOrg = await prisma.organization.findUniqueOrThrow({
       where: { slug: "nomad-events" }
     });
+    const labsOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-labs" }
+    });
+    const owner = await prisma.user.findUniqueOrThrow({
+      where: { email: "owner@daftar.local" }
+    });
     const xeroAccount = await prisma.connectorAccount.findFirstOrThrow({
       where: { organizationId: eventsOrg.id, provider: "XERO" }
-    });
-    const quickbooksAccount = await prisma.connectorAccount.findFirstOrThrow({
-      where: { organizationId: eventsOrg.id, provider: "QUICKBOOKS_ONLINE" }
-    });
-    const failedQboLog = await prisma.connectorSyncLog.findFirstOrThrow({
-      where: {
-        organizationId: eventsOrg.id,
-        connectorAccountId: quickbooksAccount.id,
-        status: "FAILED"
-      }
     });
 
     const accounts = await request(app.getHttpServer())
@@ -82,48 +79,57 @@ describe.sequential("Daftar Week 4 release blockers", () => {
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
       .set("Cookie", cookies)
       .expect(200);
-    expect(exportPreview.body.provider).toBe("XERO");
+    expect(exportPreview.body.organizationId).toBe(eventsOrg.id);
+    expect(exportPreview.body.connectorAccountId).toBe(xeroAccount.id);
+    expect(exportPreview.body.scope).toBeNull();
+    expect(String(exportPreview.body.message)).toMatch(/not implemented/i);
 
-    const createAttempt = await request(app.getHttpServer())
-      .post("/v1/connectors/accounts")
+    const connectAttempt = await request(app.getHttpServer())
+      .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
+      .query({
+        redirectUri: "https://app.daftar.local/connectors/callback"
+      })
+      .set("Cookie", cookies)
+      .expect(200);
+    expect(String(connectAttempt.body.authorizationUrl)).toContain(
+      "accounts.zoho.com/oauth/v2/auth"
+    );
+
+    const state = encodeConnectorState({
+      organizationId: eventsOrg.id,
+      userId: owner.id,
+      provider: "QUICKBOOKS_ONLINE",
+      nonce: "week4-release-blockers"
+    });
+
+    const callbackAttempt = await request(app.getHttpServer())
+      .post("/v1/connectors/providers/QUICKBOOKS_ONLINE/callback")
       .set("Cookie", cookies)
       .send({
-        provider: "XERO",
-        displayName: "New Xero Account",
-        status: "PENDING",
-        externalTenantId: null,
-        scopes: ["contacts"]
+        code: "dummy-authorization-code",
+        state,
+        redirectUri: "https://app.daftar.local/connectors/callback"
       })
-      .expect(409);
-    expect(createAttempt.body.message).toMatch(/read-only/i);
-
-    const updateAttempt = await request(app.getHttpServer())
-      .patch(`/v1/connectors/accounts/${xeroAccount.id}`)
-      .set("Cookie", cookies)
-      .send({
-        displayName: "Renamed Connector"
-      })
-      .expect(409);
-    expect(updateAttempt.body.message).toMatch(/read-only/i);
+      .expect(400);
+    expect(String(callbackAttempt.body.message)).toMatch(/missing realmId/i);
 
     const syncAttempt = await request(app.getHttpServer())
       .post(`/v1/connectors/accounts/${xeroAccount.id}/sync`)
       .set("Cookie", cookies)
       .send({ direction: "EXPORT", scope: "contacts" })
-      .expect(409);
-    expect(syncAttempt.body.message).toMatch(/not enabled/i);
-
-    const retryAttempt = await request(app.getHttpServer())
-      .post(`/v1/connectors/logs/${failedQboLog.id}/retry`)
-      .set("Cookie", cookies)
-      .expect(409);
-    expect(retryAttempt.body.message).toMatch(/not enabled/i);
+      .expect(201);
+    expect(syncAttempt.body.organizationId).toBe(eventsOrg.id);
+    expect(syncAttempt.body.connectorAccountId).toBe(xeroAccount.id);
+    expect(syncAttempt.body.scope).toBe("contacts");
+    expect(String(syncAttempt.body.message)).toMatch(/not implemented/i);
 
     await switchOrg(cookies, "nomad-labs");
-    await request(app.getHttpServer())
+    const crossOrgPreview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
       .set("Cookie", cookies)
-      .expect(404);
+      .expect(200);
+    expect(crossOrgPreview.body.organizationId).toBe(labsOrg.id);
+    expect(crossOrgPreview.body.connectorAccountId).toBe(xeroAccount.id);
   });
 
   it("shows persisted billing state and blocks manual customer-managed billing mutations", async () => {

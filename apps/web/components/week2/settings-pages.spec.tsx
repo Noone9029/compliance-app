@@ -33,7 +33,6 @@ const { fetchServerJson, getCapabilities } = vi.hoisted(() => ({
           scopes: ["contacts", "invoices"],
           connectedAt: "2026-04-01T00:00:00.000Z",
           lastSyncedAt: "2026-04-12T00:00:00.000Z",
-          metadata: null,
           createdAt: "2026-04-01T00:00:00.000Z",
           updatedAt: "2026-04-12T00:00:00.000Z"
         }

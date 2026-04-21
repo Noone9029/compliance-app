@@ -7,12 +7,30 @@ import {
 } from "./compliance-core";
 import {
   createComplianceTransportClient,
+  type ComplianceTransportCredentials,
   type ComplianceTransportClient,
   ComplianceTransportError,
 } from "./compliance-transport";
 import { enqueueComplianceSubmission } from "./compliance-queue";
 
 type PrismaClientLike = PrismaClient | Prisma.TransactionClient;
+
+function onboardingTransportCredentials(onboarding: {
+  csid: string | null;
+  certificateSecret: string | null;
+  certificatePem: string | null;
+} | null): ComplianceTransportCredentials | null {
+  if (!onboarding?.csid || !onboarding.certificateSecret) {
+    return null;
+  }
+
+  return {
+    clientId: onboarding.csid,
+    clientSecret: onboarding.certificateSecret,
+    certificatePem: onboarding.certificatePem,
+    certificateSecret: onboarding.certificateSecret,
+  };
+}
 
 function acceptedDocumentStatus(flow: "CLEARANCE" | "REPORTING", warned: boolean) {
   if (flow === "CLEARANCE") {
@@ -157,6 +175,18 @@ export async function processComplianceSubmission(input: {
   });
 
   try {
+    if (
+      !complianceDocument.onboarding ||
+      complianceDocument.onboarding.status !== "ACTIVE" ||
+      complianceDocument.onboarding.certificateStatus !== "ACTIVE"
+    ) {
+      throw new ComplianceTransportError({
+        message: "Compliance onboarding is not active for this organization/device.",
+        category: "CONFIGURATION",
+        retryable: false,
+      });
+    }
+
     const result = await transport.submit({
       flow: submission.flow,
       invoiceId: salesInvoice.id,
@@ -165,6 +195,7 @@ export async function processComplianceSubmission(input: {
       attemptNumber,
       invoiceHash: complianceDocument.currentHash,
       xmlContent: complianceDocument.xmlContent,
+      credentials: onboardingTransportCredentials(complianceDocument.onboarding),
       onboarding: complianceDocument.onboarding
         ? {
             environment: complianceDocument.onboarding.environment,

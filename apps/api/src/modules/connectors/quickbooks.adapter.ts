@@ -222,12 +222,15 @@ export class QuickBooksAdapter implements ConnectorAdapter {
     );
     const taxTotal = this.round2(invoice.TotalTax ?? 0);
     const total = this.round2(invoice.TotalAmt ?? subtotal + taxTotal);
+    const balance =
+      typeof invoice.Balance === "number" ? this.round2(invoice.Balance) : null;
+    const status = this.deriveInvoiceStatus(balance, total);
 
     return {
       externalId: invoice.Id,
       provider: this.provider,
       documentNumber: invoice.DocNumber?.trim() || `QBO-${invoice.Id}`,
-      status: "DRAFT",
+      status,
       currency: invoice.CurrencyRef?.value?.trim() || "SAR",
       issueDate: invoice.TxnDate?.trim() || new Date().toISOString().slice(0, 10),
       dueDate: invoice.DueDate?.trim() || null,
@@ -236,10 +239,22 @@ export class QuickBooksAdapter implements ConnectorAdapter {
       subtotal,
       taxTotal,
       total,
-      balance: typeof invoice.Balance === "number" ? this.round2(invoice.Balance) : null,
+      balance,
       lines,
       raw: invoice as Record<string, unknown>
     };
+  }
+
+  private deriveInvoiceStatus(balance: number | null, total: number) {
+    if (balance !== null && balance <= 0 && total > 0) {
+      return "PAID";
+    }
+
+    if (balance !== null && balance > 0 && balance < total) {
+      return "PARTIALLY_PAID";
+    }
+
+    return "ISSUED";
   }
 
   private mapInvoiceLine(line: QuickBooksLine): CanonicalInvoiceLine {

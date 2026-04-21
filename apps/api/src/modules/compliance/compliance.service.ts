@@ -14,8 +14,6 @@ import type {
   EInvoiceIntegrationRecord,
   ReportedDocumentRecord,
 } from "@daftar/types";
-import { loadEnv } from "@daftar/config";
-
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import {
@@ -29,11 +27,8 @@ import {
   maxComplianceAttempts,
   nextInvoiceCounter,
 } from "./compliance-core";
+import { ComplianceCryptoService } from "./compliance-crypto.service";
 import { ComplianceQueueService } from "./compliance-queue.service";
-import {
-  fingerprintSecret,
-  hasConfiguredZatcaCredentials,
-} from "./compliance-transport";
 
 const eInvoiceIntegrationKey = "week10.einvoice.integration";
 const paymentMeansOptions = [
@@ -42,6 +37,25 @@ const paymentMeansOptions = [
   { code: "48", label: "Bank Card" },
   { code: "49", label: "Direct Debit" },
 ] as const;
+
+type PrepareOnboardingInput = {
+  deviceSerial: string;
+  commonName: string;
+  organizationUnitName?: string;
+  organizationName: string;
+  vatNumber: string;
+  branchName?: string;
+  countryCode?: string;
+  locationAddress?: string;
+  industry?: string;
+};
+
+type IntegrationConfig = {
+  environment: "Production" | "Sandbox";
+  integrationDate?: string | null;
+  status?: "REGISTERED" | "NOT_REGISTERED";
+  mappings?: Record<string, string | null>;
+};
 
 function reportedDocumentRecord(record: {
   id: string;
@@ -216,22 +230,26 @@ function onboardingRecord(record: {
   environment: string;
   deviceName: string;
   deviceSerial: string;
-  status:
-    | "NOT_STARTED"
-    | "PENDING_CONFIGURATION"
-    | "ACTIVE"
-    | "EXPIRED"
-    | "REVOKED"
-    | "ERROR";
-  certificateStatus:
-    | "NOT_REQUESTED"
-    | "CSR_GENERATED"
-    | "ACTIVE"
-    | "EXPIRED"
-    | "REVOKED"
-    | "ERROR";
+  status: ComplianceOnboardingRecord["status"];
+  certificateStatus: ComplianceOnboardingRecord["certificateStatus"];
+  commonName: string | null;
+  egsSerialNumber: string | null;
+  organizationUnitName: string | null;
+  organizationName: string | null;
+  countryCode: string | null;
+  vatNumber: string | null;
+  branchName: string | null;
+  locationAddress: string | null;
+  industry: string | null;
+  csrPem: string | null;
+  csrBase64: string | null;
+  otpReceivedAt: Date | null;
+  csrGeneratedAt: Date | null;
+  csrSubmittedAt: Date | null;
   csid: string | null;
   certificateId: string | null;
+  certificatePem: string | null;
+  certificateBase64: string | null;
   secretFingerprint: string | null;
   certificateIssuedAt: Date | null;
   certificateExpiresAt: Date | null;
@@ -249,6 +267,25 @@ function onboardingRecord(record: {
     deviceSerial: record.deviceSerial,
     status: record.status,
     certificateStatus: record.certificateStatus,
+    commonName: record.commonName,
+    egsSerialNumber: record.egsSerialNumber,
+    organizationUnitName: record.organizationUnitName,
+    organizationName: record.organizationName,
+    countryCode: record.countryCode,
+    vatNumber: record.vatNumber,
+    branchName: record.branchName,
+    locationAddress: record.locationAddress,
+    industry: record.industry,
+    hasCsr: Boolean(record.csrPem || record.csrBase64),
+    hasCertificate: Boolean(
+      record.certificatePem ||
+        record.certificateBase64 ||
+        record.certificateId ||
+        record.csid,
+    ),
+    csrGeneratedAt: record.csrGeneratedAt?.toISOString() ?? null,
+    otpReceivedAt: record.otpReceivedAt?.toISOString() ?? null,
+    csrSubmittedAt: record.csrSubmittedAt?.toISOString() ?? null,
     csid: record.csid,
     certificateId: record.certificateId,
     secretFingerprint: record.secretFingerprint,
@@ -265,12 +302,12 @@ function onboardingRecord(record: {
 
 @Injectable()
 export class ComplianceService {
-  private readonly env = loadEnv();
-
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(ComplianceQueueService)
     private readonly complianceQueueService: ComplianceQueueService,
+    @Inject(ComplianceCryptoService)
+    private readonly complianceCryptoService: ComplianceCryptoService,
   ) {}
 
   async getOverview(organizationId: string): Promise<ComplianceOverviewRecord> {
@@ -345,7 +382,15 @@ export class ComplianceService {
   }
 
   async getIntegration(organizationId: string): Promise<EInvoiceIntegrationRecord> {
-    const [organization, taxDetail, bankAccounts, setting, onboarding, timeline] =
+    const [
+      organization,
+      taxDetail,
+      bankAccounts,
+      setting,
+      latestOnboarding,
+      activeOnboarding,
+      timeline,
+    ] =
       await Promise.all([
         this.prisma.organization.findUniqueOrThrow({
           where: { id: organizationId },
@@ -369,30 +414,22 @@ export class ComplianceService {
           where: { organizationId },
           orderBy: { updatedAt: "desc" },
         }),
+        this.findActiveOnboarding(organizationId),
         this.prisma.complianceEvent.findMany({
           where: { organizationId },
           orderBy: { createdAt: "desc" },
           take: 12,
         }),
       ]);
-    const config =
-      (setting?.value as {
-        environment?: "Production" | "Sandbox";
-        integrationDate?: string | null;
-        status?: "REGISTERED" | "NOT_REGISTERED";
-        mappings?: Record<string, string | null>;
-      } | null) ?? {
-        environment: "Production",
-        integrationDate: null,
-        status: "NOT_REGISTERED",
-        mappings: {},
-      };
+    const config = this.integrationConfig(setting?.value);
     const optionMap = new Map<string, string>(
       paymentMeansOptions.map((option) => [option.code, option.label]),
     );
-    const currentOnboarding = onboarding ? onboardingRecord(onboarding) : null;
-    const status =
-      currentOnboarding?.status === "ACTIVE" ? "REGISTERED" : "NOT_REGISTERED";
+    const currentOnboarding = latestOnboarding ? onboardingRecord(latestOnboarding) : null;
+    const registeredOnboarding = activeOnboarding
+      ? onboardingRecord(activeOnboarding)
+      : null;
+    const status = registeredOnboarding ? "REGISTERED" : "NOT_REGISTERED";
 
     return {
       organizationName: organization.name,
@@ -401,6 +438,7 @@ export class ComplianceService {
       registrationNumber: taxDetail?.registrationNumber ?? null,
       environment: config.environment ?? "Production",
       integrationDate:
+        registeredOnboarding?.lastActivatedAt ??
         currentOnboarding?.lastActivatedAt ??
         config.integrationDate ??
         null,
@@ -467,6 +505,255 @@ export class ComplianceService {
     return this.getIntegration(organizationId);
   }
 
+  async getOnboarding(
+    organizationId: string,
+    onboardingId: string,
+  ): Promise<ComplianceOnboardingRecord> {
+    const onboarding = await this.getOnboardingEntityOrThrow(
+      organizationId,
+      onboardingId,
+    );
+
+    return onboardingRecord(onboarding);
+  }
+
+  async prepareOnboarding(
+    organizationId: string,
+    input: PrepareOnboardingInput,
+  ): Promise<ComplianceOnboardingRecord> {
+    const environment = await this.integrationEnvironment(organizationId);
+    const onboarding = await this.prisma.complianceOnboarding.upsert({
+      where: {
+        organizationId_deviceSerial: {
+          organizationId,
+          deviceSerial: input.deviceSerial,
+        },
+      },
+      update: {
+        environment,
+        deviceName: input.commonName,
+        deviceSerial: input.deviceSerial,
+        commonName: input.commonName,
+        egsSerialNumber: input.deviceSerial,
+        organizationUnitName: input.organizationUnitName ?? null,
+        organizationName: input.organizationName,
+        countryCode: input.countryCode ?? "SA",
+        vatNumber: input.vatNumber,
+        branchName: input.branchName ?? null,
+        locationAddress: input.locationAddress ?? null,
+        industry: input.industry ?? null,
+        status: "DRAFT",
+        certificateStatus: "NOT_REQUESTED",
+        csrPem: null,
+        csrBase64: null,
+        privateKeyPem: null,
+        publicKeyPem: null,
+        otpCode: null,
+        otpReceivedAt: null,
+        csrGeneratedAt: null,
+        csrSubmittedAt: null,
+        csid: null,
+        certificateId: null,
+        certificatePem: null,
+        certificateBase64: null,
+        certificateSecret: null,
+        secretFingerprint: null,
+        certificateIssuedAt: null,
+        certificateExpiresAt: null,
+        lastActivatedAt: null,
+        lastRenewedAt: null,
+        zatcaRequestId: null,
+        revokedAt: null,
+        lastError: null,
+        metadata: Prisma.JsonNull,
+      },
+      create: {
+        organizationId,
+        environment,
+        deviceName: input.commonName,
+        deviceSerial: input.deviceSerial,
+        commonName: input.commonName,
+        egsSerialNumber: input.deviceSerial,
+        organizationUnitName: input.organizationUnitName ?? null,
+        organizationName: input.organizationName,
+        countryCode: input.countryCode ?? "SA",
+        vatNumber: input.vatNumber,
+        branchName: input.branchName ?? null,
+        locationAddress: input.locationAddress ?? null,
+        industry: input.industry ?? null,
+        status: "DRAFT",
+        certificateStatus: "NOT_REQUESTED",
+        metadata: Prisma.JsonNull,
+      },
+    });
+
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        complianceOnboardingId: onboarding.id,
+        action: "compliance.onboarding.prepared",
+        status: onboarding.status,
+        message: "Tenant device onboarding draft prepared.",
+      },
+    });
+
+    return onboardingRecord(onboarding);
+  }
+
+  async generateCsrForOnboarding(
+    organizationId: string,
+    onboardingId: string,
+  ): Promise<ComplianceOnboardingRecord> {
+    const onboarding = await this.getOnboardingEntityOrThrow(
+      organizationId,
+      onboardingId,
+    );
+    this.ensureOnboardingStatus(
+      onboarding.status,
+      ["DRAFT", "FAILED"],
+      "Onboarding must be in DRAFT or FAILED status before CSR generation.",
+    );
+    const missingField = this.requiredOnboardingField(onboarding);
+    if (missingField) {
+      throw new BadRequestException(
+        `Onboarding field ${missingField} is required before CSR generation.`,
+      );
+    }
+
+    const generated = await this.complianceCryptoService.generateCsr({
+      commonName: onboarding.commonName!,
+      organizationName: onboarding.organizationName!,
+      organizationUnitName: onboarding.organizationUnitName ?? undefined,
+      vatNumber: onboarding.vatNumber!,
+      countryCode: onboarding.countryCode!,
+      deviceSerial: onboarding.deviceSerial,
+    });
+    const updated = await this.prisma.complianceOnboarding.update({
+      where: { id: onboarding.id },
+      data: {
+        status: "CSR_GENERATED",
+        certificateStatus: "CSR_GENERATED",
+        privateKeyPem: generated.privateKeyPem,
+        publicKeyPem: generated.publicKeyPem,
+        csrPem: generated.csrPem,
+        csrBase64: generated.csrBase64,
+        csrGeneratedAt: new Date(),
+        otpCode: null,
+        otpReceivedAt: null,
+        csrSubmittedAt: null,
+        csid: null,
+        certificateId: null,
+        certificatePem: null,
+        certificateBase64: null,
+        certificateSecret: null,
+        secretFingerprint: null,
+        certificateIssuedAt: null,
+        certificateExpiresAt: null,
+        lastActivatedAt: null,
+        lastError: null,
+        zatcaRequestId: null,
+      },
+    });
+
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        complianceOnboardingId: updated.id,
+        action: "compliance.onboarding.csr_generated",
+        status: updated.status,
+        message: "CSR material generated for the tenant device onboarding record.",
+      },
+    });
+
+    return onboardingRecord(updated);
+  }
+
+  async markOtpPending(
+    organizationId: string,
+    onboardingId: string,
+  ): Promise<ComplianceOnboardingRecord> {
+    const onboarding = await this.getOnboardingEntityOrThrow(
+      organizationId,
+      onboardingId,
+    );
+    this.ensureOnboardingStatus(
+      onboarding.status,
+      ["CSR_GENERATED"],
+      "CSR must be generated and onboarding must be in CSR_GENERATED status before requesting OTP.",
+    );
+    if (!onboarding.csrPem && !onboarding.csrBase64) {
+      throw new BadRequestException(
+        "CSR must be generated before the onboarding record can wait for OTP.",
+      );
+    }
+
+    const updated = await this.prisma.complianceOnboarding.update({
+      where: { id: onboarding.id },
+      data: {
+        status: "OTP_PENDING",
+        certificateStatus: "OTP_PENDING",
+        lastError: null,
+      },
+    });
+
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        complianceOnboardingId: updated.id,
+        action: "compliance.onboarding.otp_pending",
+        status: updated.status,
+        message: "CSR is ready and the onboarding record is waiting for OTP submission.",
+      },
+    });
+
+    return onboardingRecord(updated);
+  }
+
+  async submitOtp(
+    organizationId: string,
+    onboardingId: string,
+    otpCode: string,
+  ): Promise<ComplianceOnboardingRecord> {
+    const onboarding = await this.getOnboardingEntityOrThrow(
+      organizationId,
+      onboardingId,
+    );
+    this.ensureOnboardingStatus(
+      onboarding.status,
+      ["OTP_PENDING"],
+      "Onboarding must be in OTP_PENDING status before OTP submission.",
+    );
+    if (!onboarding.csrPem && !onboarding.csrBase64) {
+      throw new BadRequestException(
+        "CSR must be generated before OTP submission.",
+      );
+    }
+
+    const updated = await this.prisma.complianceOnboarding.update({
+      where: { id: onboarding.id },
+      data: {
+        otpCode,
+        otpReceivedAt: new Date(),
+        csrSubmittedAt: new Date(),
+        status: "CSR_SUBMITTED",
+        certificateStatus: "CSR_SUBMITTED",
+        lastError: null,
+      },
+    });
+
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        complianceOnboardingId: updated.id,
+        action: "compliance.onboarding.otp_submitted",
+        status: updated.status,
+        message: "OTP captured for staged CSR submission.",
+      },
+    });
+
+    return onboardingRecord(updated);
+  }
+
   async onboard(organizationId: string) {
     const [taxDetail, organization, integration, existingOnboarding] =
       await Promise.all([
@@ -487,109 +774,30 @@ export class ComplianceService {
       throw new NotFoundException("Organisation tax details are not configured.");
     }
 
-    const credentialsConfigured =
-      this.env.NODE_ENV === "test" || hasConfiguredZatcaCredentials(this.env);
-    const now = new Date();
-    const onboarding = await this.prisma.complianceOnboarding.upsert({
-      where: {
-        organizationId_deviceSerial: {
-          organizationId,
-          deviceSerial:
-            existingOnboarding?.deviceSerial ??
-            `egs-${organization.slug}-${organizationId.slice(-6)}`,
-        },
-      },
-      update: {
-        environment: integration.environment,
-        deviceName:
-          existingOnboarding?.deviceName ?? `${organization.name} EGS Unit`,
-        status: credentialsConfigured ? "ACTIVE" : "PENDING_CONFIGURATION",
-        certificateStatus: credentialsConfigured ? "ACTIVE" : "CSR_GENERATED",
-        csid: credentialsConfigured
-          ? this.env.NODE_ENV === "test"
-            ? `sandbox-${organizationId.slice(-8)}`
-            : this.env.ZATCA_CLIENT_ID
-          : null,
-        certificateId: credentialsConfigured
-          ? this.env.NODE_ENV === "test"
-            ? `cert-${organizationId.slice(-8)}`
-            : this.env.ZATCA_CLIENT_ID
-          : null,
-        secretFingerprint: credentialsConfigured
-          ? fingerprintSecret(
-              this.env.NODE_ENV === "test"
-                ? "sandbox-secret"
-                : this.env.ZATCA_CLIENT_SECRET,
-            )
-          : null,
-        certificateIssuedAt: credentialsConfigured ? now : null,
-        certificateExpiresAt: credentialsConfigured
-          ? new Date(Date.UTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()))
-          : null,
-        lastActivatedAt: credentialsConfigured ? now : null,
-        lastRenewedAt: credentialsConfigured ? now : null,
-        revokedAt: null,
-        lastError: credentialsConfigured
-          ? null
-          : "ZATCA sandbox credentials are not configured for this workspace.",
-        metadata: credentialsConfigured
-          ? ({
-              publicKey:
-                this.env.NODE_ENV === "test" ? "sandbox-public-key" : null,
-              xmlSignature:
-                this.env.NODE_ENV === "test" ? "sandbox-xml-signature" : null,
-              technicalStamp:
-                this.env.NODE_ENV === "test" ? "sandbox-technical-stamp" : null,
-            } satisfies Record<string, string | null>)
-          : Prisma.JsonNull,
-      },
-      create: {
-        organizationId,
-        environment: integration.environment,
-        deviceName: `${organization.name} EGS Unit`,
-        deviceSerial:
-          existingOnboarding?.deviceSerial ??
-          `egs-${organization.slug}-${organizationId.slice(-6)}`,
-        status: credentialsConfigured ? "ACTIVE" : "PENDING_CONFIGURATION",
-        certificateStatus: credentialsConfigured ? "ACTIVE" : "CSR_GENERATED",
-        csid: credentialsConfigured
-          ? this.env.NODE_ENV === "test"
-            ? `sandbox-${organizationId.slice(-8)}`
-            : this.env.ZATCA_CLIENT_ID
-          : null,
-        certificateId: credentialsConfigured
-          ? this.env.NODE_ENV === "test"
-            ? `cert-${organizationId.slice(-8)}`
-            : this.env.ZATCA_CLIENT_ID
-          : null,
-        secretFingerprint: credentialsConfigured
-          ? fingerprintSecret(
-              this.env.NODE_ENV === "test"
-                ? "sandbox-secret"
-                : this.env.ZATCA_CLIENT_SECRET,
-            )
-          : null,
-        certificateIssuedAt: credentialsConfigured ? now : null,
-        certificateExpiresAt: credentialsConfigured
-          ? new Date(Date.UTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()))
-          : null,
-        lastActivatedAt: credentialsConfigured ? now : null,
-        lastRenewedAt: credentialsConfigured ? now : null,
-        lastError: credentialsConfigured
-          ? null
-          : "ZATCA sandbox credentials are not configured for this workspace.",
-        metadata: credentialsConfigured
-          ? ({
-              publicKey:
-                this.env.NODE_ENV === "test" ? "sandbox-public-key" : null,
-              xmlSignature:
-                this.env.NODE_ENV === "test" ? "sandbox-xml-signature" : null,
-              technicalStamp:
-                this.env.NODE_ENV === "test" ? "sandbox-technical-stamp" : null,
-            } satisfies Record<string, string | null>)
-          : Prisma.JsonNull,
-      },
+    const prepared = await this.prepareOnboarding(organizationId, {
+      deviceSerial:
+        existingOnboarding?.deviceSerial ??
+        `egs-${organization.slug}-${organizationId.slice(-6)}`,
+      commonName: existingOnboarding?.commonName ?? `${organization.name} EGS Unit`,
+      organizationUnitName:
+        existingOnboarding?.organizationUnitName ??
+        taxDetail.registrationNumber ??
+        undefined,
+      organizationName: taxDetail.legalName ?? organization.name,
+      vatNumber: taxDetail.taxNumber,
+      branchName: existingOnboarding?.branchName ?? organization.name,
+      countryCode: taxDetail.countryCode,
+      locationAddress:
+        existingOnboarding?.locationAddress ??
+        [taxDetail.addressLine1, taxDetail.addressLine2, taxDetail.city]
+          .filter(Boolean)
+          .join(", "),
+      industry: existingOnboarding?.industry ?? "General",
     });
+    const onboarding = await this.generateCsrForOnboarding(
+      organizationId,
+      prepared.id,
+    );
 
     await this.prisma.complianceEvent.create({
       data: {
@@ -597,10 +805,7 @@ export class ComplianceService {
         complianceOnboardingId: onboarding.id,
         action: "compliance.integration.onboarded",
         status: onboarding.status,
-        message:
-          onboarding.status === "ACTIVE"
-            ? "Device onboarding is active and ready for submissions."
-            : "Device record created. Complete sandbox credential setup to activate submissions.",
+        message: `Device onboarding prepared in ${integration.environment} with staged CSR generation.`,
       },
     });
 
@@ -617,40 +822,9 @@ export class ComplianceService {
       return this.onboard(organizationId);
     }
 
-    const credentialsConfigured =
-      this.env.NODE_ENV === "test" || hasConfiguredZatcaCredentials(this.env);
-    const now = new Date();
-    await this.prisma.complianceOnboarding.update({
-      where: { id: onboarding.id },
-      data: {
-        status: credentialsConfigured ? "ACTIVE" : "PENDING_CONFIGURATION",
-        certificateStatus: credentialsConfigured ? "ACTIVE" : "CSR_GENERATED",
-        certificateIssuedAt: credentialsConfigured ? now : onboarding.certificateIssuedAt,
-        certificateExpiresAt: credentialsConfigured
-          ? new Date(Date.UTC(now.getUTCFullYear() + 1, now.getUTCMonth(), now.getUTCDate()))
-          : onboarding.certificateExpiresAt,
-        lastRenewedAt: now,
-        lastActivatedAt: credentialsConfigured ? now : onboarding.lastActivatedAt,
-        revokedAt: null,
-        lastError: credentialsConfigured
-          ? null
-          : "ZATCA sandbox credentials are not configured for this workspace.",
-      },
-    });
-
-    await this.prisma.complianceEvent.create({
-      data: {
-        organizationId,
-        complianceOnboardingId: onboarding.id,
-        action: "compliance.integration.renewed",
-        status: credentialsConfigured ? "ACTIVE" : "PENDING_CONFIGURATION",
-        message: credentialsConfigured
-          ? "Certificate lifecycle renewed for the active device."
-          : "Renewal was recorded, but sandbox credentials are still required before activation.",
-      },
-    });
-
-    return this.getIntegration(organizationId);
+    throw new BadRequestException(
+      "Use the staged onboarding endpoints to continue device renewal.",
+    );
   }
 
   async removeIntegration(organizationId: string) {
@@ -682,6 +856,90 @@ export class ComplianceService {
     }
 
     return this.getIntegration(organizationId);
+  }
+
+  private integrationConfig(value: Prisma.JsonValue | null | undefined): IntegrationConfig {
+    return (
+      (value as IntegrationConfig | null) ?? {
+        environment: "Production",
+        integrationDate: null,
+        status: "NOT_REGISTERED",
+        mappings: {},
+      }
+    );
+  }
+
+  private async integrationEnvironment(organizationId: string) {
+    const setting = await this.prisma.organizationSetting.findUnique({
+      where: {
+        organizationId_key: {
+          organizationId,
+          key: eInvoiceIntegrationKey,
+        },
+      },
+    });
+
+    return this.integrationConfig(setting?.value).environment ?? "Production";
+  }
+
+  private async getOnboardingEntityOrThrow(
+    organizationId: string,
+    onboardingId: string,
+  ) {
+    const onboarding = await this.prisma.complianceOnboarding.findFirst({
+      where: {
+        id: onboardingId,
+        organizationId,
+      },
+    });
+
+    if (!onboarding) {
+      throw new NotFoundException("Compliance onboarding record not found.");
+    }
+
+    return onboarding;
+  }
+
+  private requiredOnboardingField(record: {
+    commonName: string | null;
+    organizationName: string | null;
+    vatNumber: string | null;
+    countryCode: string | null;
+    deviceSerial: string;
+  }) {
+    if (!record.commonName) {
+      return "commonName";
+    }
+
+    if (!record.organizationName) {
+      return "organizationName";
+    }
+
+    if (!record.vatNumber) {
+      return "vatNumber";
+    }
+
+    if (!record.countryCode) {
+      return "countryCode";
+    }
+
+    if (!record.deviceSerial) {
+      return "deviceSerial";
+    }
+
+    return null;
+  }
+
+  private ensureOnboardingStatus(
+    currentStatus: string,
+    allowedStatuses: readonly string[],
+    message: string,
+  ) {
+    if (allowedStatuses.includes(currentStatus)) {
+      return;
+    }
+
+    throw new BadRequestException(`${message} Current status: ${currentStatus}.`);
   }
 
   async reportInvoice(

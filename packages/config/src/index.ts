@@ -32,6 +32,10 @@ export const baseEnvSchema = z.object({
   XERO_CLIENT_SECRET: z.string().min(1).default("placeholder"),
   QBO_CLIENT_ID: z.string().min(1).default("placeholder"),
   QBO_CLIENT_SECRET: z.string().min(1).default("placeholder"),
+  CONNECTOR_SECRETS_KEY: z
+    .string()
+    .min(16)
+    .default("connector-secrets-local-dev-key"),
   ZOHO_CLIENT_ID: z.string().min(1).default("placeholder"),
   ZOHO_CLIENT_SECRET: z.string().min(1).default("placeholder"),
   ZATCA_BASE_URL: z.string().min(1).default("https://sandbox.example.zatca.gov.sa"),

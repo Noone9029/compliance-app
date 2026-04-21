@@ -1,7 +1,8 @@
-import { Injectable } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { QuickBooksTransport } from "./quickbooks.transport";
+import { ConnectorCredentialsService } from "./connector-credentials.service";
 
 type QuickBooksCustomer = {
   Id: string;
@@ -55,18 +56,21 @@ type QuickBooksQueryResponse<T> = {
   QueryResponse?: Record<string, T[] | number | undefined>;
 };
 
-type StoredConnectorMetadata = {
-  accessToken?: string;
-  refreshToken?: string;
-  expiresAt?: string;
-  raw?: Record<string, unknown>;
+type FreshQuickBooksAccount = {
+  id: string;
+  externalTenantId: string | null;
+  accessToken: string;
 };
 
 @Injectable()
 export class QuickBooksApiClient {
   constructor(
+    @Inject(PrismaService)
     private readonly prisma: PrismaService,
-    private readonly quickBooksTransport: QuickBooksTransport
+    @Inject(QuickBooksTransport)
+    private readonly quickBooksTransport: QuickBooksTransport,
+    @Inject(ConnectorCredentialsService)
+    private readonly connectorCredentials: ConnectorCredentialsService
   ) {}
 
   async listCustomers(connectorAccountId: string): Promise<QuickBooksCustomer[]> {
@@ -75,7 +79,7 @@ export class QuickBooksApiClient {
 
     const data = await this.query<QuickBooksCustomer>(
       realmId,
-      account.metadata as StoredConnectorMetadata,
+      account.accessToken,
       "SELECT * FROM Customer STARTPOSITION 1 MAXRESULTS 1000"
     );
 
@@ -88,80 +92,101 @@ export class QuickBooksApiClient {
 
     const data = await this.query<QuickBooksInvoice>(
       realmId,
-      account.metadata as StoredConnectorMetadata,
+      account.accessToken,
       "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 1000"
     );
 
     return (data.QueryResponse?.Invoice as QuickBooksInvoice[] | undefined) ?? [];
   }
 
-  private async getFreshAccount(connectorAccountId: string) {
+  private async getFreshAccount(
+    connectorAccountId: string
+  ): Promise<FreshQuickBooksAccount> {
     const account = await this.prisma.connectorAccount.findUnique({
-      where: { id: connectorAccountId }
+      where: { id: connectorAccountId },
+      select: {
+        id: true,
+        provider: true,
+        externalTenantId: true
+      }
     });
 
     if (!account) {
       throw new Error("Connector account not found.");
     }
 
-    const metadata = (account.metadata ?? {}) as StoredConnectorMetadata;
-    const accessToken = metadata.accessToken;
-    const refreshToken = metadata.refreshToken;
-    const expiresAt = metadata.expiresAt;
+    if (account.provider !== "QUICKBOOKS_ONLINE") {
+      throw new Error("QuickBooks API client can only load QuickBooks connectors.");
+    }
 
-    if (!accessToken || !refreshToken || !expiresAt) {
-      throw new Error("QuickBooks connector tokens are incomplete.");
+    const tokens = await this.connectorCredentials.getDecryptedCredentials(
+      connectorAccountId
+    );
+
+    if (tokens.provider !== "QUICKBOOKS_ONLINE") {
+      throw new Error("Connector credentials provider does not match QuickBooks.");
     }
 
     const refreshThresholdMs = 2 * 60 * 1000;
-    const expiresAtMs = new Date(expiresAt).getTime();
+    const expiresAtMs = tokens.expiresAt.getTime();
 
     if (Number.isNaN(expiresAtMs)) {
       throw new Error("QuickBooks connector expiry timestamp is invalid.");
     }
 
     if (expiresAtMs - Date.now() > refreshThresholdMs) {
-      return account;
+      return {
+        id: account.id,
+        externalTenantId: account.externalTenantId,
+        accessToken: tokens.accessToken
+      };
     }
 
     const refreshed = await this.quickBooksTransport.refreshAccessToken!({
-      refreshToken
+      refreshToken: tokens.refreshToken
     });
 
-    const updated = await this.prisma.connectorAccount.update({
-      where: { id: account.id },
-      data: {
-        metadata: {
-          ...(metadata.raw ? { raw: metadata.raw } : {}),
-          accessToken: refreshed.accessToken,
-          refreshToken: refreshed.refreshToken,
-          expiresAt: refreshed.expiresAt,
-          raw: refreshed.raw
-        } as Prisma.InputJsonValue,
-        scopes: refreshed.scopes as Prisma.InputJsonValue
-      }
+    await this.prisma.$transaction(async (tx) => {
+      await this.connectorCredentials.rotateCredentials(
+        {
+          connectorAccountId: account.id,
+          provider: "QUICKBOOKS_ONLINE",
+          tokenSet: refreshed
+        },
+        tx
+      );
+
+      await tx.connectorAccount.update({
+        where: { id: account.id },
+        data: {
+          scopes: refreshed.scopes as Prisma.InputJsonValue
+        }
+      });
     });
 
-    return updated;
+    return {
+      id: account.id,
+      externalTenantId: account.externalTenantId,
+      accessToken: refreshed.accessToken
+    };
   }
 
   private async query<T>(
     realmId: string,
-    metadata: StoredConnectorMetadata,
+    accessToken: string,
     statement: string
   ): Promise<QuickBooksQueryResponse<T>> {
-    const response = await fetch(
-      `https://quickbooks.api.intuit.com/v3/company/${encodeURIComponent(
-        realmId
-      )}/query?query=${encodeURIComponent(statement)}`,
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${metadata.accessToken!}`,
-          Accept: "application/json"
-        }
+    const endpoint = `https://quickbooks.api.intuit.com/v3/company/${encodeURIComponent(
+      realmId
+    )}/query?query=${encodeURIComponent(statement)}`;
+
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json"
       }
-    );
+    });
 
     if (!response.ok) {
       const text = await response.text();

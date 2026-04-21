@@ -397,36 +397,34 @@ describe.sequential("Daftar Week 2 foundation", () => {
       .set("Cookie", cookies)
       .expect(200);
     expect(connectorAccounts.body.length).toBeGreaterThanOrEqual(2);
+    expect(
+      connectorAccounts.body.every(
+        (account: { scopes: unknown; metadata?: unknown }) =>
+          !("metadata" in account) &&
+          Array.isArray(account.scopes) &&
+          account.scopes.every((scope: unknown) => typeof scope === "string")
+      )
+    ).toBe(true);
 
     const preview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${existingZohoAccount.id}/export-preview`)
       .set("Cookie", cookies)
       .expect(200);
-    expect(preview.body.provider).toBe("ZOHO_BOOKS");
+    expect(preview.body.organizationId).toBe(eventsOrg.id);
+    expect(preview.body.connectorAccountId).toBe(existingZohoAccount.id);
+    expect(preview.body.scope).toBeNull();
+    expect(String(preview.body.message)).toMatch(/not implemented/i);
 
-    const createAttempt = await request(app.getHttpServer())
-      .post("/v1/connectors/accounts")
-      .set("Cookie", cookies)
-      .send({
-        provider: "ZOHO_BOOKS",
-        displayName: "Week 2 Zoho Books",
-        status: "PENDING",
-        externalTenantId: "zoho-week2",
-        scopes: ["contacts.read", "accounts.read"],
-        metadata: { mode: "oauth-ready" }
+    const connectAttempt = await request(app.getHttpServer())
+      .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
+      .query({
+        redirectUri: "https://app.daftar.local/connectors/callback"
       })
-      .expect(409);
-    expect(createAttempt.body.message).toMatch(/read-only/i);
-
-    const updateAttempt = await request(app.getHttpServer())
-      .patch(`/v1/connectors/accounts/${existingZohoAccount.id}`)
       .set("Cookie", cookies)
-      .send({
-        status: "CONNECTED",
-        lastSyncedAt: "2026-04-12T10:00:00.000Z"
-      })
-      .expect(409);
-    expect(updateAttempt.body.message).toMatch(/read-only/i);
+      .expect(200);
+    expect(String(connectAttempt.body.authorizationUrl)).toContain(
+      "accounts.zoho.com/oauth/v2/auth"
+    );
 
     const logs = await request(app.getHttpServer())
       .get("/v1/connectors/logs")
@@ -437,6 +435,15 @@ describe.sequential("Daftar Week 2 foundation", () => {
 
   it("enforces Week 2 permissions for viewer role", async () => {
     const cookies = await signIn("viewer@daftar.local");
+    const labsOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-labs" }
+    });
+    const labsXeroAccount = await prisma.connectorAccount.findFirstOrThrow({
+      where: {
+        organizationId: labsOrg.id,
+        provider: "XERO"
+      }
+    });
 
     await request(app.getHttpServer())
       .get("/v1/contacts")
@@ -469,13 +476,18 @@ describe.sequential("Daftar Week 2 foundation", () => {
       .expect(403);
 
     await request(app.getHttpServer())
-      .post("/v1/connectors/accounts")
+      .get("/v1/connectors/providers/XERO/connect-url")
+      .query({
+        redirectUri: "https://app.daftar.local/connectors/callback"
+      })
+      .set("Cookie", cookies)
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .post(`/v1/connectors/accounts/${labsXeroAccount.id}/sync`)
       .set("Cookie", cookies)
       .send({
-        provider: "XERO",
-        displayName: "Forbidden Connector",
-        status: "PENDING",
-        scopes: []
+        direction: "EXPORT"
       })
       .expect(403);
 

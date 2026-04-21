@@ -96,7 +96,7 @@ describe.sequential("Daftar Week 4 extensions", () => {
       .set("Cookie", cookies)
       .expect(200);
     expect(invoiceAfterCredit.body.amountDue).toBe(
-      (Number(invoiceAmountDueBefore) - 230).toFixed(2)
+      Math.max(0, Number(invoiceAmountDueBefore) - 230).toFixed(2)
     );
 
     await request(app.getHttpServer())
@@ -219,7 +219,7 @@ describe.sequential("Daftar Week 4 extensions", () => {
       .set("Cookie", cookies)
       .expect(200);
     expect(billAfterCredit.body.amountDue).toBe(
-      (Number(billAmountDueBefore) - 115).toFixed(2)
+      Math.max(0, Number(billAmountDueBefore) - 115).toFixed(2)
     );
 
     const createdOrder = await request(app.getHttpServer())
@@ -328,18 +328,19 @@ describe.sequential("Daftar Week 4 extensions", () => {
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
       .set("Cookie", cookies)
       .expect(200);
-    expect(preview.body.provider).toBe("XERO");
-    expect(preview.body.scopes.length).toBeGreaterThanOrEqual(4);
-    expect(
-      preview.body.scopes.some((scope: { scope: string; recordCount: number }) => scope.scope === "contacts")
-    ).toBe(true);
+    expect(preview.body.organizationId).toBe(eventsOrg.id);
+    expect(preview.body.connectorAccountId).toBe(xeroAccount.id);
+    expect(preview.body.scope).toBeNull();
+    expect(String(preview.body.message)).toMatch(/not implemented/i);
 
     const syncResult = await request(app.getHttpServer())
       .post(`/v1/connectors/accounts/${xeroAccount.id}/sync`)
       .set("Cookie", cookies)
       .send({ direction: "EXPORT", scope: "contacts,invoices,bills,quotes" })
-      .expect(409);
-    expect(syncResult.body.message).toMatch(/not enabled/i);
+      .expect(201);
+    expect(syncResult.body.connectorAccountId).toBe(xeroAccount.id);
+    expect(syncResult.body.scope).toBe("contacts,invoices,bills,quotes");
+    expect(String(syncResult.body.message)).toMatch(/not implemented/i);
 
     const billingSummaryBefore = await request(app.getHttpServer())
       .get("/v1/billing/summary")

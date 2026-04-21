@@ -27,13 +27,11 @@ coverage/
 # =========================
 # ENV FILES
 # =========================
+.env
 .env.local
 .env.development
 .env.production
 .env.test
-
-# Allow base .env (since yours is empty)
-!.env
 
 # =========================
 # PRISMA / DATABASE
@@ -82,6 +80,7 @@ apps/api/dist/
 apps/web/.next/
 apps/web/out/
 apps/worker/dist/
+apps/api/.local-storage/
 
 # =========================
 # UPLOADS (future)

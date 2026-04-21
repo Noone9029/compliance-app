@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import type { ConnectorProvider } from "@daftar/types";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { SalesInvoiceStatus } from "@prisma/client";
-import { createHash, randomUUID } from "crypto";
+import { ComplianceService } from "../compliance/compliance.service";
 
 import { XeroAdapter } from "./xero.adapter";
 import { QuickBooksAdapter } from "./quickbooks.adapter";
@@ -11,6 +11,11 @@ import { ZohoBooksAdapter } from "./zoho-books.adapter";
 
 import { QuickBooksTransport } from "./quickbooks.transport";
 import { QuickBooksApiClient } from "./quickbooks.api";
+import { ConnectorCredentialsService } from "./connector-credentials.service";
+import { XeroTransport } from "./xero.transport";
+import { XeroApiClient } from "./xero.api";
+import { ZohoTransport } from "./zoho.transport";
+import { ZohoApiClient } from "./zoho.api";
 
 import {
   createConnectorNonce,
@@ -40,8 +45,18 @@ export class ConnectorsService {
     @Inject(ZohoBooksAdapter) zohoBooksAdapter: ZohoBooksAdapter,
 
     @Inject(QuickBooksTransport) quickBooksTransport: QuickBooksTransport,
+    @Inject(XeroTransport) xeroTransport: XeroTransport,
+    @Inject(ZohoTransport) zohoTransport: ZohoTransport,
     @Inject(QuickBooksApiClient)
-    private readonly quickBooksApiClient: QuickBooksApiClient
+    private readonly quickBooksApiClient: QuickBooksApiClient,
+    @Inject(XeroApiClient)
+    private readonly xeroApiClient: XeroApiClient,
+    @Inject(ZohoApiClient)
+    private readonly zohoApiClient: ZohoApiClient,
+    @Inject(ConnectorCredentialsService)
+    private readonly connectorCredentials: ConnectorCredentialsService,
+    @Inject(ComplianceService)
+    private readonly complianceService: ComplianceService
   ) {
     const adapterEntries: Array<[string, ConnectorAdapter]> = [
       [xeroAdapter.provider, xeroAdapter],
@@ -52,6 +67,8 @@ export class ConnectorsService {
     this.adapters = new Map(adapterEntries);
 
     const transportEntries: Array<[string, ConnectorProviderTransport]> = [
+      [xeroTransport.provider, xeroTransport],
+      [zohoTransport.provider, zohoTransport],
       [quickBooksTransport.provider, quickBooksTransport]
     ];
 
@@ -105,54 +122,66 @@ export class ConnectorsService {
     }
 
     const transport = this.getTransport(input.provider);
+    const providedExternalTenantId = input.externalTenantId?.trim() || null;
+
+    if (input.provider === "QUICKBOOKS_ONLINE" && !providedExternalTenantId) {
+      throw new BadRequestException(
+        "QuickBooks callback is missing realmId. Reconnect and include realmId from the provider callback."
+      );
+    }
 
     const tokens = await transport.exchangeAuthorizationCode({
       organizationId: input.organizationId,
       userId: input.userId,
       code: input.code,
-      redirectUri: input.redirectUri
+      redirectUri: input.redirectUri,
+      externalTenantId: providedExternalTenantId
     });
 
-    const account = await this.prisma.connectorAccount.upsert({
-      where: {
-        organizationId_provider: {
+    const externalTenantId =
+      tokens.externalTenantId?.trim() || providedExternalTenantId;
+
+    const account = await this.prisma.$transaction(async (tx) => {
+      const connectorAccount = await tx.connectorAccount.upsert({
+        where: {
+          organizationId_provider: {
+            organizationId: input.organizationId,
+            provider: input.provider
+          }
+        },
+        update: {
+          status: "CONNECTED",
+          displayName: tokens.displayName ?? input.provider,
+          externalTenantId,
+          connectedByUserId: input.userId,
+          connectedAt: new Date(),
+          scopes: tokens.scopes as Prisma.InputJsonValue
+        },
+        create: {
           organizationId: input.organizationId,
-          provider: input.provider
+          provider: input.provider,
+          status: "CONNECTED",
+          displayName: tokens.displayName ?? input.provider,
+          externalTenantId,
+          connectedByUserId: input.userId,
+          connectedAt: new Date(),
+          scopes: tokens.scopes as Prisma.InputJsonValue
         }
-      },
-      update: {
-        status: "CONNECTED",
-        displayName: tokens.displayName ?? input.provider,
-        externalTenantId: tokens.externalTenantId,
-        connectedByUserId: input.userId,
-        connectedAt: new Date(),
-        metadata: {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          expiresAt: tokens.expiresAt,
-          raw: tokens.raw
-        } as Prisma.InputJsonValue,
-        scopes: tokens.scopes as Prisma.InputJsonValue
-      },
-      create: {
-        organizationId: input.organizationId,
-        provider: input.provider,
-        status: "CONNECTED",
-        displayName: tokens.displayName ?? input.provider,
-        externalTenantId: tokens.externalTenantId,
-        connectedByUserId: input.userId,
-        connectedAt: new Date(),
-        metadata: {
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          expiresAt: tokens.expiresAt,
-          raw: tokens.raw
-        } as Prisma.InputJsonValue,
-        scopes: tokens.scopes as Prisma.InputJsonValue
-      }
+      });
+
+      await this.connectorCredentials.saveConnectedCredentials(
+        {
+          connectorAccountId: connectorAccount.id,
+          provider: input.provider,
+          tokenSet: tokens
+        },
+        tx
+      );
+
+      return connectorAccount;
     });
 
-    return account;
+    return this.sanitizeConnectorAccount(account);
   }
 
   /* =========================
@@ -160,10 +189,12 @@ export class ConnectorsService {
   ========================= */
 
   async listAccounts(organizationId: string) {
-    return this.prisma.connectorAccount.findMany({
+    const accounts = await this.prisma.connectorAccount.findMany({
       where: { organizationId },
       orderBy: { createdAt: "desc" }
     });
+
+    return accounts.map((account) => this.sanitizeConnectorAccount(account));
   }
 
   async listLogs(organizationId: string, connectorAccountId?: string) {
@@ -182,6 +213,7 @@ export class ConnectorsService {
 
   async runSync(
     organizationId: string,
+    userId: string,
     connectorAccountId: string,
     input: {
       direction: "IMPORT" | "EXPORT";
@@ -201,10 +233,24 @@ export class ConnectorsService {
 
     if (input.direction === "IMPORT") {
       if (account.provider === "QUICKBOOKS_ONLINE") {
-        return this.runQuickBooksImport(organizationId, account.id);
+        return this.runQuickBooksImport(organizationId, userId, account.id);
       }
 
-      return this.runBootstrapImport(organizationId, account.id);
+      if (
+        account.provider === "XERO" &&
+        (await this.hasStoredCredentials(account.id))
+      ) {
+        return this.runXeroImport(organizationId, userId, account.id);
+      }
+
+      if (
+        account.provider === "ZOHO_BOOKS" &&
+        (await this.hasStoredCredentials(account.id))
+      ) {
+        return this.runZohoImport(organizationId, userId, account.id);
+      }
+
+      return this.runBootstrapImport(organizationId, userId, account.id);
     }
 
     return this.runExportPreview(
@@ -220,6 +266,7 @@ export class ConnectorsService {
 
   private async runQuickBooksImport(
     organizationId: string,
+    userId: string,
     connectorAccountId: string
   ) {
     const account = await this.prisma.connectorAccount.findFirst({
@@ -257,30 +304,10 @@ export class ConnectorsService {
         connectorAccountId,
         bundle
       );
-      const complianceDocsCreated =
-      await this.createComplianceDocumentsForInvoices(
-        organizationId,
-        connectorAccountId
-      );
 
-      const xmlGenerated =
-      await this.generateXmlForComplianceDocuments(
+      const compliance = await this.queueImportedInvoicesForCompliance(
         organizationId,
-        connectorAccountId
-      );
-
-      const queued = await this.queueComplianceDocuments(
-        organizationId,
-        connectorAccountId
-      );
-
-      const submitted = await this.submitQueuedDocuments(
-        organizationId,
-        connectorAccountId
-      );
-
-      const finalized = await this.finalizeSubmittedDocuments(
-        organizationId,
+        userId,
         connectorAccountId
       );
       
@@ -306,7 +333,9 @@ export class ConnectorsService {
             customersFetched: customers.length,
             invoicesFetched: invoices.length,
             contactsPersisted: summary.contacts,
-            invoicesPrepared: summary.invoices
+            invoicesPrepared: summary.invoices,
+            invoicesQueuedForCompliance: compliance.queued,
+            invoicesSkippedForCompliance: compliance.skipped
           } as Prisma.InputJsonValue
         }
       });
@@ -320,11 +349,7 @@ export class ConnectorsService {
           contacts: summary.contacts,
           invoices: summary.invoices
         },
-        complianceDocumentsCreated: complianceDocsCreated,
-        xmlGenerated,
-        queued,
-        submitted,
-        finalized,
+        compliance,
         log
       };
 
@@ -361,11 +386,258 @@ export class ConnectorsService {
   }
 
   /* =========================
+     XERO LIVE IMPORT
+  ========================= */
+
+  private async runXeroImport(
+    organizationId: string,
+    userId: string,
+    connectorAccountId: string
+  ) {
+    const account = await this.prisma.connectorAccount.findFirst({
+      where: {
+        id: connectorAccountId,
+        organizationId
+      }
+    });
+
+    if (!account) {
+      throw new Error("Connector account not found");
+    }
+
+    const adapter = this.getAdapter(account.provider);
+
+    if (account.provider !== "XERO") {
+      throw new Error("runXeroImport called for non-Xero connector");
+    }
+
+    const startedAt = new Date();
+
+    try {
+      const [contacts, invoices] = await Promise.all([
+        this.xeroApiClient.listContacts(connectorAccountId),
+        this.xeroApiClient.listInvoices(connectorAccountId)
+      ]);
+
+      const bundle = (adapter as XeroAdapter).mapLiveImportPayload({
+        contacts,
+        invoices
+      });
+
+      const summary = await this.persistCanonicalImportBundle(
+        organizationId,
+        connectorAccountId,
+        bundle
+      );
+
+      const compliance = await this.queueImportedInvoicesForCompliance(
+        organizationId,
+        userId,
+        connectorAccountId
+      );
+
+      await this.prisma.connectorAccount.update({
+        where: { id: connectorAccountId },
+        data: {
+          lastSyncedAt: new Date()
+        }
+      });
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "SUCCESS",
+          retryable: false,
+          startedAt,
+          finishedAt: new Date(),
+          metadata: {
+            mode: "xero-live",
+            contactsFetched: contacts.length,
+            invoicesFetched: invoices.length,
+            contactsPersisted: summary.contacts,
+            invoicesPrepared: summary.invoices,
+            invoicesQueuedForCompliance: compliance.queued,
+            invoicesSkippedForCompliance: compliance.skipped
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return {
+        ok: true,
+        mode: "xero-live",
+        organizationId,
+        connectorAccountId,
+        imported: {
+          contacts: summary.contacts,
+          invoices: summary.invoices
+        },
+        compliance,
+        log
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Xero import failed";
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "FAILED",
+          retryable: true,
+          message,
+          startedAt,
+          finishedAt: new Date(),
+          metadata: {
+            mode: "xero-live"
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return {
+        ok: false,
+        mode: "xero-live",
+        organizationId,
+        connectorAccountId,
+        message,
+        log
+      };
+    }
+  }
+
+  /* =========================
+     ZOHO LIVE IMPORT
+  ========================= */
+
+  private async runZohoImport(
+    organizationId: string,
+    userId: string,
+    connectorAccountId: string
+  ) {
+    const account = await this.prisma.connectorAccount.findFirst({
+      where: {
+        id: connectorAccountId,
+        organizationId
+      }
+    });
+
+    if (!account) {
+      throw new Error("Connector account not found");
+    }
+
+    const adapter = this.getAdapter(account.provider);
+
+    if (account.provider !== "ZOHO_BOOKS") {
+      throw new Error("runZohoImport called for non-Zoho connector");
+    }
+
+    const startedAt = new Date();
+
+    try {
+      const [contacts, invoices] = await Promise.all([
+        this.zohoApiClient.listContacts(connectorAccountId),
+        this.zohoApiClient.listInvoices(connectorAccountId)
+      ]);
+
+      const bundle = (adapter as ZohoBooksAdapter).mapLiveImportPayload({
+        contacts,
+        invoices
+      });
+
+      const summary = await this.persistCanonicalImportBundle(
+        organizationId,
+        connectorAccountId,
+        bundle
+      );
+
+      const compliance = await this.queueImportedInvoicesForCompliance(
+        organizationId,
+        userId,
+        connectorAccountId
+      );
+
+      await this.prisma.connectorAccount.update({
+        where: { id: connectorAccountId },
+        data: {
+          lastSyncedAt: new Date()
+        }
+      });
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "SUCCESS",
+          retryable: false,
+          startedAt,
+          finishedAt: new Date(),
+          metadata: {
+            mode: "zoho-live",
+            contactsFetched: contacts.length,
+            invoicesFetched: invoices.length,
+            contactsPersisted: summary.contacts,
+            invoicesPrepared: summary.invoices,
+            invoicesQueuedForCompliance: compliance.queued,
+            invoicesSkippedForCompliance: compliance.skipped
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return {
+        ok: true,
+        mode: "zoho-live",
+        organizationId,
+        connectorAccountId,
+        imported: {
+          contacts: summary.contacts,
+          invoices: summary.invoices
+        },
+        compliance,
+        log
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Zoho import failed";
+
+      const log = await this.prisma.connectorSyncLog.create({
+        data: {
+          organizationId,
+          connectorAccountId,
+          direction: "IMPORT",
+          scope: "FULL",
+          status: "FAILED",
+          retryable: true,
+          message,
+          startedAt,
+          finishedAt: new Date(),
+          metadata: {
+            mode: "zoho-live"
+          } as Prisma.InputJsonValue
+        }
+      });
+
+      return {
+        ok: false,
+        mode: "zoho-live",
+        organizationId,
+        connectorAccountId,
+        message,
+        log
+      };
+    }
+  }
+
+  /* =========================
      BOOTSTRAP (fallback)
   ========================= */
 
   private async runBootstrapImport(
     organizationId: string,
+    userId: string,
     connectorAccountId: string
   ) {
     const account = await this.prisma.connectorAccount.findFirst({
@@ -406,29 +678,9 @@ export class ConnectorsService {
       bundle
     );
 
-    const complianceDocsCreated =
-      await this.createComplianceDocumentsForInvoices(
-        organizationId,
-        connectorAccountId
-      );
-    
-    const xmlGenerated =
-      await this.generateXmlForComplianceDocuments(
-        organizationId,
-        connectorAccountId
-      );
-    const queued = await this.queueComplianceDocuments(
+    const compliance = await this.queueImportedInvoicesForCompliance(
       organizationId,
-      connectorAccountId
-    );
-
-    const submitted = await this.submitQueuedDocuments(
-      organizationId,
-      connectorAccountId
-    );
-
-    const finalized = await this.finalizeSubmittedDocuments(
-      organizationId,
+      userId,
       connectorAccountId
     );
     return {
@@ -440,11 +692,7 @@ export class ConnectorsService {
         contacts: summary.contacts,
         invoices: summary.invoices
       },
-      complianceDocumentsCreated: complianceDocsCreated,
-      xmlGenerated,
-      queued,
-      submitted,
-      finalized
+      compliance
     };
   }
 
@@ -511,112 +759,56 @@ export class ConnectorsService {
     };
   }
 
-  /* =========================
-     HELPERS
-  ========================= */
-  private async queueComplianceDocuments(
+  private async queueImportedInvoicesForCompliance(
     organizationId: string,
+    userId: string,
     connectorAccountId: string
   ) {
-    const docs = await this.prisma.complianceDocument.findMany({
+    const invoices = await this.prisma.salesInvoice.findMany({
       where: {
         organizationId,
-        status: "READY",
-        salesInvoice: {
-          sourceConnectorAccountId: connectorAccountId
+        sourceConnectorAccountId: connectorAccountId,
+        status: {
+          notIn: ["DRAFT", "VOID"]
         }
+      },
+      select: {
+        id: true
       }
     });
 
     let queued = 0;
+    let skipped = 0;
+    let firstSkipReason: string | null = null;
 
-    for (const doc of docs) {
-      await this.prisma.complianceDocument.update({
-        where: { id: doc.id },
-        data: {
-          status: "QUEUED"
-        }
-      });
-
-      queued++;
-    }
-
-    return queued;
-  }
-
-  private async submitQueuedDocuments(
-    organizationId: string,
-    connectorAccountId: string
-  ) {
-    const docs = await this.prisma.complianceDocument.findMany({
-      where: {
-        organizationId,
-        status: "QUEUED",
-        salesInvoice: {
-          sourceConnectorAccountId: connectorAccountId
-        }
+    for (const invoice of invoices) {
+      try {
+        await this.complianceService.reportInvoice(
+          organizationId,
+          userId,
+          invoice.id
+        );
+        queued += 1;
+      } catch (error) {
+        skipped += 1;
+        firstSkipReason ??= this.errorMessage(
+          error,
+          "Failed to queue imported invoice for compliance."
+        );
       }
-    });
-
-    let submitted = 0;
-
-    for (const doc of docs) {
-      await new Promise((r) => setTimeout(r, 50));
-
-      await this.prisma.complianceDocument.update({
-        where: { id: doc.id },
-        data: {
-          status: "PROCESSING"
-        }
-      });
-
-      submitted++;
     }
 
-    return submitted;
+    return {
+      eligible: invoices.length,
+      queued,
+      skipped,
+      firstSkipReason
+    };
   }
 
-  private async finalizeSubmittedDocuments(
-    organizationId: string,
-    connectorAccountId: string
-  ) {
-    const docs = await this.prisma.complianceDocument.findMany({
-      where: {
-        organizationId,
-        status: "PROCESSING",
-        salesInvoice: {
-          sourceConnectorAccountId: connectorAccountId
-        }
-      },
-      include: {
-        salesInvoice: true
-      }
-    });
-
-    let finalized = 0;
-
-    for (const doc of docs) {
-      const isAccepted = Math.random() > 0.1;
-
-      const finalStatus = isAccepted
-        ? doc.salesInvoice.complianceInvoiceKind === "STANDARD"
-          ? "CLEARED"
-          : "REPORTED"
-        : "REJECTED";
-
-      await this.prisma.complianceDocument.update({
-        where: { id: doc.id },
-        data: {
-          status: finalStatus
-        }
-      });
-
-      finalized++;
-    }
-
-    return finalized;
-  }
-
+  /* =========================
+     HELPERS
+  ========================= */
   private mapImportedInvoiceStatus(
     sourceStatus: string,
     balance: number,
@@ -728,430 +920,6 @@ export class ConnectorsService {
     }
 
     return created.id;
-  }
-
-  private async generateXmlForComplianceDocuments(
-    organizationId: string,
-    connectorAccountId: string
-  ) {
-    const organization = await this.prisma.organization.findUnique({
-      where: { id: organizationId },
-      include: {
-        taxDetail: true
-      }
-    });
-
-    if (!organization) {
-      throw new Error("Organization not found");
-    }
-
-    const docs = await this.prisma.complianceDocument.findMany({
-      where: {
-        organizationId,
-        status: "DRAFT",
-        salesInvoice: {
-          sourceConnectorAccountId: connectorAccountId
-        }
-      },
-      include: {
-        salesInvoice: {
-          include: {
-            contact: {
-              include: {
-                addresses: true
-              }
-            },
-            lines: true
-          }
-        }
-      },
-      orderBy: {
-        createdAt: "asc"
-      }
-    });
-
-    let generated = 0;
-
-    for (const doc of docs) {
-      const qrPayload = this.buildQrPayload({
-        sellerName:
-          organization.taxDetail?.legalName?.trim() ||
-          organization.name.trim(),
-        vatNumber: organization.taxDetail?.taxNumber?.trim() || "",
-        timestamp: doc.salesInvoice.issueDate,
-        invoiceTotal: Number(doc.salesInvoice.total),
-        vatTotal: Number(doc.salesInvoice.taxTotal)
-      });
-
-      const xml = this.generateInvoiceXml(
-        organization,
-        doc.salesInvoice,
-        doc,
-        qrPayload
-      );
-
-      await this.prisma.complianceDocument.update({
-        where: { id: doc.id },
-        data: {
-          qrPayload,
-          xmlContent: xml,
-          status: "READY"
-        }
-      });
-
-      generated++;
-    }
-
-    return generated;
-  }
-
-  private generateInvoiceXml(
-    organization: {
-      name: string;
-      taxDetail: {
-        legalName: string;
-        taxNumber: string;
-        addressLine1: string | null;
-        addressLine2: string | null;
-        city: string | null;
-        postalCode: string | null;
-        countryCode: string;
-        registrationNumber: string | null;
-      } | null;
-    },
-    invoice: {
-      invoiceNumber: string;
-      issueDate: Date;
-      dueDate: Date;
-      currencyCode: string;
-      notes: string | null;
-      subtotal: Prisma.Decimal;
-      taxTotal: Prisma.Decimal;
-      total: Prisma.Decimal;
-      amountPaid: Prisma.Decimal;
-      amountDue: Prisma.Decimal;
-      complianceInvoiceKind: "STANDARD" | "SIMPLIFIED";
-      contact: {
-        displayName: string;
-        companyName: string | null;
-        taxNumber: string | null;
-        addresses: Array<{
-          line1: string;
-          line2: string | null;
-          city: string | null;
-          postalCode: string | null;
-          countryCode: string;
-        }>;
-      };
-      lines: Array<{
-        id: string;
-        description: string;
-        quantity: Prisma.Decimal;
-        unitPrice: Prisma.Decimal;
-        lineSubtotal: Prisma.Decimal;
-        lineTax: Prisma.Decimal;
-        lineTotal: Prisma.Decimal;
-        taxRatePercent: Prisma.Decimal;
-        taxRateName: string | null;
-      }>;
-    },
-    doc: {
-      uuid: string;
-      previousHash: string | null;
-      currentHash: string;
-    },
-    qrPayload: string
-  ) {
-    const sellerName =
-      organization.taxDetail?.legalName?.trim() ||
-      organization.name.trim();
-
-    const sellerVat = organization.taxDetail?.taxNumber?.trim() || "";
-    const sellerAddress1 = organization.taxDetail?.addressLine1?.trim() || "";
-    const sellerAddress2 = organization.taxDetail?.addressLine2?.trim() || "";
-    const sellerCity = organization.taxDetail?.city?.trim() || "";
-    const sellerPostal = organization.taxDetail?.postalCode?.trim() || "";
-    const sellerCountry = organization.taxDetail?.countryCode?.trim() || "SA";
-    const sellerRegistration =
-      organization.taxDetail?.registrationNumber?.trim() || "";
-
-    const buyerAddress = invoice.contact.addresses[0];
-    const buyerName =
-      invoice.contact.companyName?.trim() || invoice.contact.displayName.trim();
-    const buyerVat = invoice.contact.taxNumber?.trim() || "";
-    const buyerAddress1 = buyerAddress?.line1?.trim() || "";
-    const buyerAddress2 = buyerAddress?.line2?.trim() || "";
-    const buyerCity = buyerAddress?.city?.trim() || "";
-    const buyerPostal = buyerAddress?.postalCode?.trim() || "";
-    const buyerCountry = buyerAddress?.countryCode?.trim() || "SA";
-
-    const issueDate = this.formatDate(invoice.issueDate);
-    const issueTime = this.formatTime(invoice.issueDate);
-    const dueDate = this.formatDate(invoice.dueDate);
-
-    const invoiceTypeName =
-      invoice.complianceInvoiceKind === "SIMPLIFIED" ? "0200000" : "0100000";
-    const invoiceTypeCode = "388";
-
-    const lineXml = invoice.lines
-      .map((line, index) => {
-        const quantity = this.formatDecimal(line.quantity);
-        const unitPrice = this.formatDecimal(line.unitPrice);
-        const lineSubtotal = this.formatDecimal(line.lineSubtotal);
-        const lineTax = this.formatDecimal(line.lineTax);
-        const lineTotal = this.formatDecimal(line.lineTotal);
-        const taxPercent = this.formatDecimal(line.taxRatePercent);
-
-        return `
-    <cac:InvoiceLine>
-      <cbc:ID>${index + 1}</cbc:ID>
-      <cbc:InvoicedQuantity unitCode="PCE">${quantity}</cbc:InvoicedQuantity>
-      <cbc:LineExtensionAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineSubtotal}</cbc:LineExtensionAmount>
-      <cac:TaxTotal>
-        <cbc:TaxAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineTax}</cbc:TaxAmount>
-        <cbc:RoundingAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${lineTotal}</cbc:RoundingAmount>
-      </cac:TaxTotal>
-      <cac:Item>
-        <cbc:Name>${this.escapeXml(line.description || "Item")}</cbc:Name>
-        <cac:ClassifiedTaxCategory>
-          <cbc:ID>S</cbc:ID>
-          <cbc:Percent>${taxPercent}</cbc:Percent>
-          <cac:TaxScheme>
-            <cbc:ID>VAT</cbc:ID>
-          </cac:TaxScheme>
-        </cac:ClassifiedTaxCategory>
-      </cac:Item>
-      <cac:Price>
-        <cbc:PriceAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${unitPrice}</cbc:PriceAmount>
-      </cac:Price>
-    </cac:InvoiceLine>`.trim();
-      })
-      .join("\n");
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-  <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
-          xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
-          xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2"
-          xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2">
-    <ext:UBLExtensions>
-      <ext:UBLExtension>
-        <ext:ExtensionContent>
-          <PreviousInvoiceHash>${this.escapeXml(doc.previousHash || "")}</PreviousInvoiceHash>
-          <InvoiceHash>${this.escapeXml(doc.currentHash)}</InvoiceHash>
-          <QRCode>${this.escapeXml(qrPayload)}</QRCode>
-        </ext:ExtensionContent>
-      </ext:UBLExtension>
-    </ext:UBLExtensions>
-
-    <cbc:ProfileID>reporting:1.0</cbc:ProfileID>
-    <cbc:ID>${this.escapeXml(invoice.invoiceNumber)}</cbc:ID>
-    <cbc:UUID>${this.escapeXml(doc.uuid)}</cbc:UUID>
-    <cbc:IssueDate>${issueDate}</cbc:IssueDate>
-    <cbc:IssueTime>${issueTime}</cbc:IssueTime>
-    <cbc:DueDate>${dueDate}</cbc:DueDate>
-    <cbc:InvoiceTypeCode name="${invoiceTypeName}">${invoiceTypeCode}</cbc:InvoiceTypeCode>
-    <cbc:DocumentCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:DocumentCurrencyCode>
-    <cbc:TaxCurrencyCode>${this.escapeXml(invoice.currencyCode)}</cbc:TaxCurrencyCode>
-
-    ${
-      invoice.notes?.trim()
-        ? `<cbc:Note>${this.escapeXml(invoice.notes.trim())}</cbc:Note>`
-        : ""
-    }
-
-    <cac:AdditionalDocumentReference>
-      <cbc:ID>QR</cbc:ID>
-      <cac:Attachment>
-        <cbc:EmbeddedDocumentBinaryObject mimeCode="text/plain">${this.escapeXml(qrPayload)}</cbc:EmbeddedDocumentBinaryObject>
-      </cac:Attachment>
-    </cac:AdditionalDocumentReference>
-
-    <cac:AccountingSupplierParty>
-      <cac:Party>
-        <cac:PartyIdentification>
-          <cbc:ID schemeID="VAT">${this.escapeXml(sellerVat)}</cbc:ID>
-        </cac:PartyIdentification>
-        ${
-          sellerRegistration
-            ? `<cac:PartyIdentification><cbc:ID schemeID="CRN">${this.escapeXml(sellerRegistration)}</cbc:ID></cac:PartyIdentification>`
-            : ""
-        }
-        <cac:PostalAddress>
-          <cbc:StreetName>${this.escapeXml(sellerAddress1)}</cbc:StreetName>
-          <cbc:AdditionalStreetName>${this.escapeXml(sellerAddress2)}</cbc:AdditionalStreetName>
-          <cbc:CityName>${this.escapeXml(sellerCity)}</cbc:CityName>
-          <cbc:PostalZone>${this.escapeXml(sellerPostal)}</cbc:PostalZone>
-          <cac:Country>
-            <cbc:IdentificationCode>${this.escapeXml(sellerCountry)}</cbc:IdentificationCode>
-          </cac:Country>
-        </cac:PostalAddress>
-        <cac:PartyTaxScheme>
-          <cbc:CompanyID>${this.escapeXml(sellerVat)}</cbc:CompanyID>
-          <cac:TaxScheme>
-            <cbc:ID>VAT</cbc:ID>
-          </cac:TaxScheme>
-        </cac:PartyTaxScheme>
-        <cac:PartyLegalEntity>
-          <cbc:RegistrationName>${this.escapeXml(sellerName)}</cbc:RegistrationName>
-        </cac:PartyLegalEntity>
-      </cac:Party>
-    </cac:AccountingSupplierParty>
-
-    <cac:AccountingCustomerParty>
-      <cac:Party>
-        ${
-          buyerVat
-            ? `<cac:PartyIdentification><cbc:ID schemeID="VAT">${this.escapeXml(buyerVat)}</cbc:ID></cac:PartyIdentification>`
-            : ""
-        }
-        <cac:PostalAddress>
-          <cbc:StreetName>${this.escapeXml(buyerAddress1)}</cbc:StreetName>
-          <cbc:AdditionalStreetName>${this.escapeXml(buyerAddress2)}</cbc:AdditionalStreetName>
-          <cbc:CityName>${this.escapeXml(buyerCity)}</cbc:CityName>
-          <cbc:PostalZone>${this.escapeXml(buyerPostal)}</cbc:PostalZone>
-          <cac:Country>
-            <cbc:IdentificationCode>${this.escapeXml(buyerCountry)}</cbc:IdentificationCode>
-          </cac:Country>
-        </cac:PostalAddress>
-        <cac:PartyLegalEntity>
-          <cbc:RegistrationName>${this.escapeXml(buyerName)}</cbc:RegistrationName>
-        </cac:PartyLegalEntity>
-      </cac:Party>
-    </cac:AccountingCustomerParty>
-
-    <cac:TaxTotal>
-      <cbc:TaxAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.taxTotal)}</cbc:TaxAmount>
-    </cac:TaxTotal>
-
-    <cac:LegalMonetaryTotal>
-      <cbc:LineExtensionAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:LineExtensionAmount>
-      <cbc:TaxExclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.subtotal)}</cbc:TaxExclusiveAmount>
-      <cbc:TaxInclusiveAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.total)}</cbc:TaxInclusiveAmount>
-      <cbc:PayableAmount currencyID="${this.escapeXml(invoice.currencyCode)}">${this.formatDecimal(invoice.amountDue)}</cbc:PayableAmount>
-    </cac:LegalMonetaryTotal>
-
-  ${lineXml}
-  </Invoice>`;
-  }
-
-  private buildQrPayload(input: {
-    sellerName: string;
-    vatNumber: string;
-    timestamp: Date;
-    invoiceTotal: number;
-    vatTotal: number;
-  }) {
-    const fields = [
-      input.sellerName,
-      input.vatNumber,
-      input.timestamp.toISOString(),
-      input.invoiceTotal.toFixed(2),
-      input.vatTotal.toFixed(2)
-    ];
-
-    const buffers: Buffer[] = [];
-
-    fields.forEach((value, index) => {
-      const valueBuffer = Buffer.from(value, "utf8");
-      buffers.push(
-        Buffer.from([index + 1]),
-        Buffer.from([valueBuffer.length]),
-        valueBuffer
-      );
-    });
-
-    return Buffer.concat(buffers).toString("base64");
-  }
-
-  private formatDate(value: Date) {
-    return value.toISOString().slice(0, 10);
-  }
-
-  private formatTime(value: Date) {
-    return value.toISOString().slice(11, 19);
-  }
-
-  private formatDecimal(value: Prisma.Decimal | number | string) {
-    return new Prisma.Decimal(value).toFixed(2);
-  }
-
-  private escapeXml(value: string) {
-    return value
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&apos;");
-  }
-
-  private async createComplianceDocumentsForInvoices(
-    organizationId: string,
-    connectorAccountId: string
-  ) {
-    const invoices = await this.prisma.salesInvoice.findMany({
-      where: {
-        organizationId,
-        sourceConnectorAccountId: connectorAccountId
-      },
-      orderBy: {
-        createdAt: "asc"
-      }
-    });
-
-    let created = 0;
-
-    for (const invoice of invoices) {
-      const existing = await this.prisma.complianceDocument.findFirst({
-        where: {
-          organizationId,
-          salesInvoiceId: invoice.id
-        }
-      });
-
-      if (existing) continue;
-
-      const previousDocument = await this.prisma.complianceDocument.findFirst({
-        where: {
-          organizationId
-        },
-        orderBy: {
-          createdAt: "desc"
-        }
-      });
-
-      const previousHash = previousDocument?.currentHash ?? null;
-
-      const currentHash = createHash("sha256")
-        .update(
-          JSON.stringify({
-            organizationId,
-            salesInvoiceId: invoice.id,
-            invoiceNumber: invoice.invoiceNumber,
-            issueDate: invoice.issueDate.toISOString(),
-            total: invoice.total.toString(),
-            previousHash
-          })
-        )
-        .digest("hex");
-
-      await this.prisma.complianceDocument.create({
-        data: {
-          organizationId,
-          salesInvoiceId: invoice.id,
-          invoiceKind: invoice.complianceInvoiceKind,
-          uuid: randomUUID(),
-          qrPayload: "",
-          previousHash,
-          currentHash,
-          status: "DRAFT",
-          xmlContent: ""
-        }
-      });
-
-      created++;
-    }
-
-    return created;
   }
 
   private async persistCanonicalInvoices(
@@ -1404,6 +1172,51 @@ export class ConnectorsService {
     return contactId;
   }
 
+  private sanitizeConnectorAccount(account: {
+    id: string;
+    organizationId: string;
+    provider: ConnectorProvider;
+    displayName: string;
+    status: string;
+    externalTenantId: string | null;
+    scopes: Prisma.JsonValue | null;
+    connectedAt: Date | null;
+    lastSyncedAt: Date | null;
+    metadata: Prisma.JsonValue | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }) {
+    return {
+      id: account.id,
+      organizationId: account.organizationId,
+      provider: account.provider,
+      displayName: account.displayName,
+      status: account.status,
+      externalTenantId: account.externalTenantId,
+      scopes: this.normalizeScopes(account.scopes),
+      connectedAt: account.connectedAt,
+      lastSyncedAt: account.lastSyncedAt,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt
+    };
+  }
+
+  private normalizeScopes(scopes: Prisma.JsonValue | null) {
+    if (!Array.isArray(scopes)) {
+      return [] as string[];
+    }
+
+    return scopes.filter((scope): scope is string => typeof scope === "string");
+  }
+
+  private errorMessage(error: unknown, fallback: string) {
+    if (error instanceof Error && error.message.trim()) {
+      return error.message;
+    }
+
+    return fallback;
+  }
+
   private getAdapter(provider: ConnectorProvider) {
     const adapter = this.adapters.get(provider);
 
@@ -1418,9 +1231,24 @@ export class ConnectorsService {
     const transport = this.transports.get(provider);
 
     if (!transport) {
-      throw new Error(`Transport missing for ${provider}`);
+      throw new BadRequestException(
+        `Connect flow is not enabled for provider ${provider}.`
+      );
     }
 
     return transport;
+  }
+
+  private async hasStoredCredentials(connectorAccountId: string) {
+    const credential = await this.prisma.connectorCredential.findUnique({
+      where: {
+        connectorAccountId
+      },
+      select: {
+        id: true
+      }
+    });
+
+    return Boolean(credential);
   }
 }

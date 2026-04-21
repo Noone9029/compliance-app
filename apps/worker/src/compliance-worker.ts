@@ -5,7 +5,10 @@ import { PrismaClient } from "@prisma/client";
 import { loadEnv, queueNames } from "@daftar/config";
 import { enqueueComplianceSubmission } from "../../api/src/modules/compliance/compliance-queue";
 import { processComplianceSubmission } from "../../api/src/modules/compliance/compliance-processor";
-import { createComplianceTransportClient } from "../../api/src/modules/compliance/compliance-transport";
+import {
+  createComplianceTransportClient,
+  fallbackComplianceTransportCredentialsFromEnv,
+} from "../../api/src/modules/compliance/compliance-transport";
 
 export async function createComplianceWorkerRuntime() {
   const env = loadEnv();
@@ -19,7 +22,10 @@ export async function createComplianceWorkerRuntime() {
       },
     },
   });
-  const transport = createComplianceTransportClient(env);
+  const transport = createComplianceTransportClient({
+    env,
+    fallbackCredentials: fallbackComplianceTransportCredentialsFromEnv(env),
+  });
   const worker = new Worker<{ submissionId: string }>(
     queueNames.complianceSubmissions,
     async (job) =>
