@@ -64,6 +64,11 @@ type FreshXeroAccount = {
 
 @Injectable()
 export class XeroApiClient {
+  private readonly refreshInFlight = new Map<
+    string,
+    Promise<FreshXeroAccount>
+  >();
+
   constructor(
     @Inject(PrismaService)
     private readonly prisma: PrismaService,
@@ -142,35 +147,11 @@ export class XeroApiClient {
       };
     }
 
-    const refreshed = await this.xeroTransport.refreshAccessToken!({
+    return this.refreshWithSingleFlight({
+      connectorAccountId: account.id,
+      tenantId,
       refreshToken: tokens.refreshToken
     });
-
-    await this.prisma.$transaction(async (tx) => {
-      await this.connectorCredentials.rotateCredentials(
-        {
-          connectorAccountId: account.id,
-          provider: "XERO",
-          tokenSet: refreshed
-        },
-        tx
-      );
-
-      await tx.connectorAccount.update({
-        where: {
-          id: account.id
-        },
-        data: {
-          scopes: refreshed.scopes as Prisma.InputJsonValue
-        }
-      });
-    });
-
-    return {
-      id: account.id,
-      externalTenantId: tenantId,
-      accessToken: refreshed.accessToken
-    };
   }
 
   private async getJson<T>(
@@ -204,5 +185,59 @@ export class XeroApiClient {
     }
 
     return normalized;
+  }
+
+  private async refreshWithSingleFlight(input: {
+    connectorAccountId: string;
+    tenantId: string;
+    refreshToken: string;
+  }) {
+    const existing = this.refreshInFlight.get(input.connectorAccountId);
+    if (existing) {
+      return existing;
+    }
+
+    const refreshPromise = this.refreshAccount(input).finally(() => {
+      this.refreshInFlight.delete(input.connectorAccountId);
+    });
+
+    this.refreshInFlight.set(input.connectorAccountId, refreshPromise);
+    return refreshPromise;
+  }
+
+  private async refreshAccount(input: {
+    connectorAccountId: string;
+    tenantId: string;
+    refreshToken: string;
+  }): Promise<FreshXeroAccount> {
+    const refreshed = await this.xeroTransport.refreshAccessToken!({
+      refreshToken: input.refreshToken
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.connectorCredentials.rotateCredentials(
+        {
+          connectorAccountId: input.connectorAccountId,
+          provider: "XERO",
+          tokenSet: refreshed
+        },
+        tx
+      );
+
+      await tx.connectorAccount.update({
+        where: {
+          id: input.connectorAccountId
+        },
+        data: {
+          scopes: refreshed.scopes as Prisma.InputJsonValue
+        }
+      });
+    });
+
+    return {
+      id: input.connectorAccountId,
+      externalTenantId: input.tenantId,
+      accessToken: refreshed.accessToken
+    };
   }
 }

@@ -185,4 +185,108 @@ describe("quickbooks api client", () => {
     expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
     expect(mocks.update).not.toHaveBeenCalled();
   });
+
+  it("uses a single refresh operation for concurrent requests on the same connector account", async () => {
+    const { api, mocks } = createHarness();
+
+    mocks.findUnique.mockResolvedValue({
+      id: "conn_qbo_concurrent",
+      provider: "QUICKBOOKS_ONLINE",
+      externalTenantId: "realm-concurrent-1"
+    });
+    mocks.getDecryptedCredentials.mockResolvedValue({
+      connectorAccountId: "conn_qbo_concurrent",
+      provider: "QUICKBOOKS_ONLINE",
+      accessToken: "qbo-old-access",
+      refreshToken: "qbo-old-refresh",
+      expiresAt: new Date(Date.now() + 15 * 1000),
+      tokenType: "bearer",
+      scopes: ["customers.read"],
+      rotationCount: 2,
+      lastRotatedAt: new Date("2026-04-21T00:00:00.000Z")
+    });
+
+    let resolveRefresh!: (value: {
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }) => void;
+    const refreshPromise = new Promise<{
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }>((resolve) => {
+      resolveRefresh = resolve;
+    });
+
+    mocks.refreshAccessToken.mockImplementation(() => refreshPromise);
+
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes("FROM%20Customer")) {
+        return {
+          ok: true,
+          json: async () => ({
+            QueryResponse: {
+              Customer: []
+            }
+          })
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({
+          QueryResponse: {
+            Invoice: []
+          }
+        })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const customersPromise = api.listCustomers("conn_qbo_concurrent");
+    const invoicesPromise = api.listInvoices("conn_qbo_concurrent");
+
+    await vi.waitFor(() => {
+      expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    });
+
+    resolveRefresh({
+      accessToken: "qbo-new-access",
+      refreshToken: "qbo-new-refresh",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      scopes: ["customers.read", "invoices.read"],
+      externalTenantId: null,
+      displayName: "QuickBooks",
+      raw: { token_type: "bearer" }
+    });
+
+    const [customers, invoices] = await Promise.all([
+      customersPromise,
+      invoicesPromise
+    ]);
+
+    expect(customers).toEqual([]);
+    expect(invoices).toEqual([]);
+    expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(mocks.rotateCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.every(
+        (call) =>
+          (call[1]?.headers as Record<string, string> | undefined)
+            ?.Authorization === "Bearer qbo-new-access"
+      )
+    ).toBe(true);
+  });
 });

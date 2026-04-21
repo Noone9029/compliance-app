@@ -66,6 +66,11 @@ type FreshZohoAccount = {
 
 @Injectable()
 export class ZohoApiClient {
+  private readonly refreshInFlight = new Map<
+    string,
+    Promise<FreshZohoAccount>
+  >();
+
   constructor(
     @Inject(PrismaService)
     private readonly prisma: PrismaService,
@@ -144,34 +149,12 @@ export class ZohoApiClient {
       };
     }
 
-    const refreshed = await this.zohoTransport.refreshAccessToken!({
-      refreshToken: tokens.refreshToken
+    return this.refreshWithSingleFlight({
+      connectorAccountId: account.id,
+      organizationId,
+      refreshToken: tokens.refreshToken,
+      credentialMetadata: tokens.credentialMetadata
     });
-
-    await this.prisma.$transaction(async (tx) => {
-      await this.connectorCredentials.rotateCredentials(
-        {
-          connectorAccountId: account.id,
-          provider: "ZOHO_BOOKS",
-          tokenSet: refreshed
-        },
-        tx
-      );
-
-      await tx.connectorAccount.update({
-        where: { id: account.id },
-        data: {
-          scopes: refreshed.scopes as Prisma.InputJsonValue
-        }
-      });
-    });
-
-    return {
-      id: account.id,
-      externalTenantId: organizationId,
-      accessToken: refreshed.accessToken,
-      apiDomain: this.resolveApiDomain(tokens.credentialMetadata, refreshed.raw)
-    };
   }
 
   private async getJson<T>(
@@ -208,6 +191,61 @@ export class ZohoApiClient {
     }
 
     return normalized;
+  }
+
+  private async refreshWithSingleFlight(input: {
+    connectorAccountId: string;
+    organizationId: string;
+    refreshToken: string;
+    credentialMetadata: ConnectorCredentialMetadata | null | undefined;
+  }) {
+    const existing = this.refreshInFlight.get(input.connectorAccountId);
+    if (existing) {
+      return existing;
+    }
+
+    const refreshPromise = this.refreshAccount(input).finally(() => {
+      this.refreshInFlight.delete(input.connectorAccountId);
+    });
+
+    this.refreshInFlight.set(input.connectorAccountId, refreshPromise);
+    return refreshPromise;
+  }
+
+  private async refreshAccount(input: {
+    connectorAccountId: string;
+    organizationId: string;
+    refreshToken: string;
+    credentialMetadata: ConnectorCredentialMetadata | null | undefined;
+  }): Promise<FreshZohoAccount> {
+    const refreshed = await this.zohoTransport.refreshAccessToken!({
+      refreshToken: input.refreshToken
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.connectorCredentials.rotateCredentials(
+        {
+          connectorAccountId: input.connectorAccountId,
+          provider: "ZOHO_BOOKS",
+          tokenSet: refreshed
+        },
+        tx
+      );
+
+      await tx.connectorAccount.update({
+        where: { id: input.connectorAccountId },
+        data: {
+          scopes: refreshed.scopes as Prisma.InputJsonValue
+        }
+      });
+    });
+
+    return {
+      id: input.connectorAccountId,
+      externalTenantId: input.organizationId,
+      accessToken: refreshed.accessToken,
+      apiDomain: this.resolveApiDomain(input.credentialMetadata, refreshed.raw)
+    };
   }
 
   private resolveApiDomain(

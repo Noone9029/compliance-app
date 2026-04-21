@@ -818,7 +818,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     const tokenCalls = fetchMock.mock.calls.filter((call) =>
       String(call[0]).includes("accounts.zoho.com/oauth/v2/token")
     );
-    expect(tokenCalls.length).toBeGreaterThanOrEqual(2);
+    expect(tokenCalls).toHaveLength(2);
 
     const refreshCalls = tokenCalls.filter((call) => {
       const body =
@@ -829,7 +829,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
             : "";
       return body.includes("grant_type=refresh_token");
     });
-    expect(refreshCalls.length).toBeGreaterThanOrEqual(1);
+    expect(refreshCalls).toHaveLength(1);
 
     const storedCredential = await prisma.connectorCredential.findUnique({
       where: {

@@ -211,4 +211,104 @@ describe("zoho api client", () => {
     );
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
   });
+
+  it("uses a single refresh operation for concurrent requests on the same connector account", async () => {
+    const { api, mocks } = createHarness();
+
+    mocks.findUnique.mockResolvedValue({
+      id: "conn_zoho_concurrent",
+      provider: "ZOHO_BOOKS",
+      externalTenantId: "zoho-org-concurrent"
+    });
+    mocks.getDecryptedCredentials.mockResolvedValue({
+      connectorAccountId: "conn_zoho_concurrent",
+      provider: "ZOHO_BOOKS",
+      accessToken: "zoho-old-access",
+      refreshToken: "zoho-old-refresh",
+      expiresAt: new Date(Date.now() + 15 * 1000),
+      tokenType: "Bearer",
+      scopes: ["ZohoBooks.fullaccess.all"],
+      credentialMetadata: {
+        apiDomain: "https://www.zohoapis.eu"
+      },
+      rotationCount: 1,
+      lastRotatedAt: new Date("2026-04-21T00:00:00.000Z")
+    });
+
+    let resolveRefresh!: (value: {
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }) => void;
+    const refreshPromise = new Promise<{
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }>((resolve) => {
+      resolveRefresh = resolve;
+    });
+
+    mocks.refreshAccessToken.mockImplementation(() => refreshPromise);
+
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes("/books/v3/contacts")) {
+        return {
+          ok: true,
+          json: async () => ({ contacts: [] })
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ invoices: [] })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contactsPromise = api.listContacts("conn_zoho_concurrent");
+    const invoicesPromise = api.listInvoices("conn_zoho_concurrent");
+
+    await vi.waitFor(() => {
+      expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    });
+
+    resolveRefresh({
+      accessToken: "zoho-new-access",
+      refreshToken: "zoho-new-refresh",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      scopes: ["ZohoBooks.fullaccess.all"],
+      externalTenantId: null,
+      displayName: "Zoho Books",
+      raw: { token_type: "Bearer" }
+    });
+
+    const [contacts, invoices] = await Promise.all([
+      contactsPromise,
+      invoicesPromise
+    ]);
+
+    expect(contacts).toEqual([]);
+    expect(invoices).toEqual([]);
+    expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(mocks.rotateCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.every(
+        (call) =>
+          String(call[0]).startsWith("https://www.zohoapis.eu/books/v3/") &&
+          (call[1]?.headers as Record<string, string> | undefined)
+            ?.Authorization === "Zoho-oauthtoken zoho-new-access"
+      )
+    ).toBe(true);
+  });
 });

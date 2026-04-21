@@ -199,4 +199,100 @@ describe("xero api client", () => {
     );
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
   });
+
+  it("uses a single refresh operation for concurrent requests on the same connector account", async () => {
+    const { api, mocks } = createHarness();
+
+    mocks.findUnique.mockResolvedValue({
+      id: "conn_xero_concurrent",
+      provider: "XERO",
+      externalTenantId: "tenant-concurrent-1"
+    });
+    mocks.getDecryptedCredentials.mockResolvedValue({
+      connectorAccountId: "conn_xero_concurrent",
+      provider: "XERO",
+      accessToken: "xero-old-access",
+      refreshToken: "xero-old-refresh",
+      expiresAt: new Date(Date.now() + 15 * 1000),
+      tokenType: "Bearer",
+      scopes: ["accounting.contacts"],
+      rotationCount: 1,
+      lastRotatedAt: new Date("2026-04-21T00:00:00.000Z")
+    });
+
+    let resolveRefresh!: (value: {
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }) => void;
+    const refreshPromise = new Promise<{
+      accessToken: string;
+      refreshToken: string;
+      expiresAt: string;
+      scopes: string[];
+      externalTenantId: null;
+      displayName: string;
+      raw: { token_type: string };
+    }>((resolve) => {
+      resolveRefresh = resolve;
+    });
+
+    mocks.refreshAccessToken.mockImplementation(() => refreshPromise);
+
+    const fetchMock = vi.fn(async (url: string | URL, _init?: RequestInit) => {
+      const target = String(url);
+      if (target.includes("/Contacts")) {
+        return {
+          ok: true,
+          json: async () => ({ Contacts: [] })
+        };
+      }
+
+      return {
+        ok: true,
+        json: async () => ({ Invoices: [] })
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contactsPromise = api.listContacts("conn_xero_concurrent");
+    const invoicesPromise = api.listInvoices("conn_xero_concurrent");
+
+    await vi.waitFor(() => {
+      expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    });
+
+    resolveRefresh({
+      accessToken: "xero-new-access",
+      refreshToken: "xero-new-refresh",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      scopes: ["accounting.contacts", "accounting.transactions"],
+      externalTenantId: null,
+      displayName: "Xero",
+      raw: { token_type: "Bearer" }
+    });
+
+    const [contacts, invoices] = await Promise.all([
+      contactsPromise,
+      invoicesPromise
+    ]);
+
+    expect(contacts).toEqual([]);
+    expect(invoices).toEqual([]);
+    expect(mocks.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(mocks.rotateCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.update).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.every(
+        (call) =>
+          (call[1]?.headers as Record<string, string> | undefined)
+            ?.Authorization === "Bearer xero-new-access"
+      )
+    ).toBe(true);
+  });
 });

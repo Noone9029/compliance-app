@@ -64,6 +64,11 @@ type FreshQuickBooksAccount = {
 
 @Injectable()
 export class QuickBooksApiClient {
+  private readonly refreshInFlight = new Map<
+    string,
+    Promise<FreshQuickBooksAccount>
+  >();
+
   constructor(
     @Inject(PrismaService)
     private readonly prisma: PrismaService,
@@ -142,33 +147,11 @@ export class QuickBooksApiClient {
       };
     }
 
-    const refreshed = await this.quickBooksTransport.refreshAccessToken!({
+    return this.refreshWithSingleFlight({
+      connectorAccountId: account.id,
+      externalTenantId: account.externalTenantId,
       refreshToken: tokens.refreshToken
     });
-
-    await this.prisma.$transaction(async (tx) => {
-      await this.connectorCredentials.rotateCredentials(
-        {
-          connectorAccountId: account.id,
-          provider: "QUICKBOOKS_ONLINE",
-          tokenSet: refreshed
-        },
-        tx
-      );
-
-      await tx.connectorAccount.update({
-        where: { id: account.id },
-        data: {
-          scopes: refreshed.scopes as Prisma.InputJsonValue
-        }
-      });
-    });
-
-    return {
-      id: account.id,
-      externalTenantId: account.externalTenantId,
-      accessToken: refreshed.accessToken
-    };
   }
 
   private async query<T>(
@@ -202,5 +185,57 @@ export class QuickBooksApiClient {
     }
 
     return value.trim();
+  }
+
+  private async refreshWithSingleFlight(input: {
+    connectorAccountId: string;
+    externalTenantId: string | null;
+    refreshToken: string;
+  }) {
+    const existing = this.refreshInFlight.get(input.connectorAccountId);
+    if (existing) {
+      return existing;
+    }
+
+    const refreshPromise = this.refreshAccount(input).finally(() => {
+      this.refreshInFlight.delete(input.connectorAccountId);
+    });
+
+    this.refreshInFlight.set(input.connectorAccountId, refreshPromise);
+    return refreshPromise;
+  }
+
+  private async refreshAccount(input: {
+    connectorAccountId: string;
+    externalTenantId: string | null;
+    refreshToken: string;
+  }): Promise<FreshQuickBooksAccount> {
+    const refreshed = await this.quickBooksTransport.refreshAccessToken!({
+      refreshToken: input.refreshToken
+    });
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.connectorCredentials.rotateCredentials(
+        {
+          connectorAccountId: input.connectorAccountId,
+          provider: "QUICKBOOKS_ONLINE",
+          tokenSet: refreshed
+        },
+        tx
+      );
+
+      await tx.connectorAccount.update({
+        where: { id: input.connectorAccountId },
+        data: {
+          scopes: refreshed.scopes as Prisma.InputJsonValue
+        }
+      });
+    });
+
+    return {
+      id: input.connectorAccountId,
+      externalTenantId: input.externalTenantId,
+      accessToken: refreshed.accessToken
+    };
   }
 }
