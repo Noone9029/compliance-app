@@ -705,6 +705,11 @@ export type ComplianceDocumentRecord = {
   externalSubmissionId: string | null;
   clearedAt: string | null;
   reportedAt: string | null;
+  localValidation: {
+    status: "PASSED" | "FAILED" | "SKIPPED";
+    warnings: string[];
+    errors: string[];
+  } | null;
   retryAllowed: boolean;
   canShareWithCustomer: boolean;
   submission: ComplianceSubmissionRecord | null;
@@ -746,6 +751,9 @@ export type ComplianceSubmissionRecord = {
   failureCategory: ComplianceFailureCategory | null;
   externalSubmissionId: string | null;
   errorMessage: string | null;
+  requestId: string | null;
+  warnings: string[];
+  errors: string[];
   createdAt: string;
   updatedAt: string;
 };
@@ -763,6 +771,9 @@ export type ComplianceSubmissionAttemptRecord = {
   failureCategory: ComplianceFailureCategory | null;
   externalSubmissionId: string | null;
   errorMessage: string | null;
+  requestId: string | null;
+  warnings: string[];
+  errors: string[];
   startedAt: string;
   finishedAt: string | null;
 };

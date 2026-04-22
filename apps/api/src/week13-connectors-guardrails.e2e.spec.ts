@@ -65,7 +65,22 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
         sourcePayload: {
           testCase: "week13-sync-guardrail",
           status: input.status
-        }
+        },
+        lines: {
+          create: [
+            {
+              description: "Connector import service line",
+              quantity: "1.00",
+              unitPrice: "100.00",
+              taxRateName: "VAT 15%",
+              taxRatePercent: "15.00",
+              lineSubtotal: "100.00",
+              lineTax: "15.00",
+              lineTotal: "115.00",
+              sortOrder: 0,
+            },
+          ],
+        },
       }
     });
   }
@@ -195,6 +210,11 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       },
       orderBy: { createdAt: "asc" }
     });
+    await prisma.connectorCredential.deleteMany({
+      where: {
+        connectorAccountId: connectorAccount.id,
+      },
+    });
     const contact = await prisma.contact.findFirstOrThrow({
       where: {
         organizationId: organization.id,
@@ -236,6 +256,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       .expect(201);
 
     expect(syncResponse.body.ok).toBe(true);
+    expect(syncResponse.body.mode).toBe("bootstrap");
     expect(syncResponse.body.compliance).toBeTruthy();
     expect(syncResponse.body.compliance.queued).toBeGreaterThanOrEqual(1);
 

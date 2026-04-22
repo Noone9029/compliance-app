@@ -1,9 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import type {
   ComplianceDocumentStatus,
+  ComplianceFailureCategory,
   ComplianceInvoiceKind,
   ComplianceSubmissionFlow,
 } from "@daftar/types";
+import {
+  buildInvoiceXml as buildUblInvoiceXml,
+  type BuildInvoiceXmlInput,
+} from "./compliance-ubl";
 
 export const maxComplianceAttempts = 5;
 const genesisInvoiceValue = "0";
@@ -26,7 +31,15 @@ export function firstPreviousInvoiceHash() {
 
 function tlvField(tag: number, value: string) {
   const valueBuffer = Buffer.from(value, "utf8");
-  return Buffer.concat([Buffer.from([tag]), Buffer.from([valueBuffer.length]), valueBuffer]);
+  const length = valueBuffer.length;
+  const lengthBytes =
+    length < 0x80
+      ? Buffer.from([length])
+      : length <= 0xff
+        ? Buffer.from([0x81, length])
+        : Buffer.from([0x82, (length >> 8) & 0xff, length & 0xff]);
+
+  return Buffer.concat([Buffer.from([tag]), lengthBytes, valueBuffer]);
 }
 
 export function buildQrPayload(input: {
@@ -102,9 +115,24 @@ export function complianceFlowForInvoiceKind(
   return invoiceKind === "STANDARD" ? "CLEARANCE" : "REPORTING";
 }
 
-export function calculateRetryDelayMs(attemptCount: number) {
+export function calculateRetryDelayMs(
+  attemptCount: number,
+  input?: {
+    failureCategory?: ComplianceFailureCategory | null;
+    statusCode?: number | null;
+  },
+) {
   const boundedAttempt = Math.max(1, attemptCount);
-  return Math.min(15 * 60 * 1000, 30 * 1000 * 2 ** (boundedAttempt - 1));
+  const statusCode = input?.statusCode ?? null;
+  const baseDelayMs = statusCode === 429 ? 60 * 1000 : 30 * 1000;
+  const maxDelayMs = statusCode === 429 ? 60 * 60 * 1000 : 15 * 60 * 1000;
+  const delay = baseDelayMs * 2 ** (boundedAttempt - 1);
+
+  if (input?.failureCategory === "CONNECTIVITY" || statusCode === 429) {
+    return Math.min(maxDelayMs, delay);
+  }
+
+  return Math.min(15 * 60 * 1000, delay);
 }
 
 export function isTerminalSubmissionStatus(status: ComplianceDocumentStatus | null | undefined) {
@@ -137,44 +165,6 @@ export function canShareInvoiceWithCustomer(input: {
   return true;
 }
 
-function escapeXml(value: string) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&apos;");
-}
-
-export function buildInvoiceXml(input: {
-  uuid: string;
-  invoiceNumber: string;
-  invoiceKind: ComplianceInvoiceKind;
-  submissionFlow: ComplianceSubmissionFlow;
-  issueDateIso: string;
-  sellerName: string;
-  taxNumber: string;
-  customerName: string;
-  invoiceCounter: number;
-  total: string;
-  taxTotal: string;
-  previousHash: string;
-}) {
-  return [
-    '<?xml version="1.0" encoding="UTF-8"?>',
-    "<Invoice>",
-    `  <UUID>${escapeXml(input.uuid)}</UUID>`,
-    `  <InvoiceNumber>${escapeXml(input.invoiceNumber)}</InvoiceNumber>`,
-    `  <InvoiceKind>${escapeXml(input.invoiceKind)}</InvoiceKind>`,
-    `  <SubmissionFlow>${escapeXml(input.submissionFlow)}</SubmissionFlow>`,
-    `  <IssueDate>${escapeXml(input.issueDateIso)}</IssueDate>`,
-    `  <SellerName>${escapeXml(input.sellerName)}</SellerName>`,
-    `  <TaxNumber>${escapeXml(input.taxNumber)}</TaxNumber>`,
-    `  <CustomerName>${escapeXml(input.customerName)}</CustomerName>`,
-    `  <InvoiceCounter>${input.invoiceCounter}</InvoiceCounter>`,
-    `  <PreviousInvoiceHash>${escapeXml(input.previousHash)}</PreviousInvoiceHash>`,
-    `  <TaxInclusiveAmount>${escapeXml(input.total)}</TaxInclusiveAmount>`,
-    `  <TaxAmount>${escapeXml(input.taxTotal)}</TaxAmount>`,
-    "</Invoice>",
-  ].join("\n");
+export function buildInvoiceXml(input: BuildInvoiceXmlInput) {
+  return buildUblInvoiceXml(input);
 }

@@ -7,7 +7,6 @@ import { enqueueComplianceSubmission } from "../../api/src/modules/compliance/co
 import { processComplianceSubmission } from "../../api/src/modules/compliance/compliance-processor";
 import {
   createComplianceTransportClient,
-  fallbackComplianceTransportCredentialsFromEnv,
 } from "../../api/src/modules/compliance/compliance-transport";
 
 export async function createComplianceWorkerRuntime() {
@@ -22,10 +21,7 @@ export async function createComplianceWorkerRuntime() {
       },
     },
   });
-  const transport = createComplianceTransportClient({
-    env,
-    fallbackCredentials: fallbackComplianceTransportCredentialsFromEnv(env),
-  });
+  const transport = createComplianceTransportClient({ env });
   const worker = new Worker<{ submissionId: string }>(
     queueNames.complianceSubmissions,
     async (job) =>

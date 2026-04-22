@@ -1,9 +1,12 @@
+import "reflect-metadata";
+
 import bcrypt from "bcryptjs";
 import { PrismaClient, type RoleKey } from "@prisma/client";
-import { createHash } from "node:crypto";
+import { createHash, webcrypto } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import * as x509 from "@peculiar/x509";
 
 import { loadEnv } from "@daftar/config";
 import { permissionKeys, roleKeys } from "@daftar/types";
@@ -59,6 +62,72 @@ const seedUsers: SeedUser[] = [
 ];
 
 const seededInvitationToken = "invite-nomad-events-accountant";
+
+type SeedComplianceMaterial = {
+  privateKeyPem: string;
+  publicKeyPem: string;
+  csrPem: string;
+  csrBase64: string;
+  certificatePem: string;
+  certificateBase64: string;
+};
+
+async function generateSeedComplianceMaterial(subjectName: string): Promise<SeedComplianceMaterial> {
+  const keys = (await webcrypto.subtle.generateKey(
+    {
+      name: "ECDSA",
+      namedCurve: "P-256",
+    },
+    true,
+    ["sign", "verify"],
+  )) as CryptoKeyPair;
+
+  const [privateKeyPkcs8, publicKeySpki] = await Promise.all([
+    webcrypto.subtle.exportKey("pkcs8", keys.privateKey),
+    webcrypto.subtle.exportKey("spki", keys.publicKey),
+  ]);
+
+  const csr = await x509.Pkcs10CertificateRequestGenerator.create(
+    {
+      name: `CN=${subjectName},O=Daftar,C=SA`,
+      keys,
+      signingAlgorithm: {
+        name: "ECDSA",
+        hash: "SHA-256",
+      },
+    },
+    webcrypto as Crypto,
+  );
+
+  const certificate = await x509.X509CertificateGenerator.createSelfSigned(
+    {
+      name: `CN=${subjectName},O=Daftar,C=SA`,
+      keys,
+      signingAlgorithm: {
+        name: "ECDSA",
+        hash: "SHA-256",
+      },
+      notBefore: new Date(),
+      notAfter: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+    },
+    webcrypto as Crypto,
+  );
+
+  return {
+    privateKeyPem: x509.PemConverter.encode(
+      privateKeyPkcs8,
+      x509.PemConverter.PrivateKeyTag,
+    ).trim(),
+    publicKeyPem: x509.PemConverter.encode(
+      publicKeySpki,
+      x509.PemConverter.PublicKeyTag,
+    ).trim(),
+    csrPem: csr.toString("pem").trim(),
+    csrBase64: Buffer.from(csr.rawData).toString("base64"),
+    certificatePem: certificate.toString("pem").trim(),
+    certificateBase64: Buffer.from(certificate.rawData).toString("base64"),
+  };
+}
 
 async function resetSeedStorage() {
   await fs.rm(storageRoot, { recursive: true, force: true });
@@ -1438,6 +1507,10 @@ export async function seedDatabase(client: PrismaClient) {
       ],
     });
 
+    const complianceMaterial = await generateSeedComplianceMaterial(
+      `${organization.slug}-seed-device`,
+    );
+
     const complianceOnboarding = await client.complianceOnboarding.create({
       data: {
         organizationId: organization.id,
@@ -1453,18 +1526,18 @@ export async function seedDatabase(client: PrismaClient) {
         branchName: isPrimary ? "Riyadh HQ" : "Karachi HQ",
         locationAddress: isPrimary ? "Olaya Street, Office 402, Riyadh" : "Clifton Block 8, Suite 12A, Karachi",
         industry: isPrimary ? "Events" : "Software",
-        csrPem: "-----BEGIN CERTIFICATE REQUEST-----\nseed-csr\n-----END CERTIFICATE REQUEST-----",
-        csrBase64: Buffer.from("seed-csr", "utf8").toString("base64"),
-        privateKeyPem: "-----BEGIN PRIVATE KEY-----\nseed-private-key\n-----END PRIVATE KEY-----",
-        publicKeyPem: "-----BEGIN PUBLIC KEY-----\nseed-public-key\n-----END PUBLIC KEY-----",
+        csrPem: complianceMaterial.csrPem,
+        csrBase64: complianceMaterial.csrBase64,
+        privateKeyPem: complianceMaterial.privateKeyPem,
+        publicKeyPem: complianceMaterial.publicKeyPem,
         csrGeneratedAt: new Date("2026-03-31T09:00:00.000Z"),
         csrSubmittedAt: new Date("2026-04-01T08:45:00.000Z"),
         status: "ACTIVE",
         certificateStatus: "ACTIVE",
         csid: `sandbox-${organization.slug}`,
         certificateId: `cert-${organization.slug}`,
-        certificatePem: "-----BEGIN CERTIFICATE-----\nseed-certificate\n-----END CERTIFICATE-----",
-        certificateBase64: Buffer.from("seed-certificate", "utf8").toString("base64"),
+        certificatePem: complianceMaterial.certificatePem,
+        certificateBase64: complianceMaterial.certificateBase64,
         certificateSecret: `seed-secret-${organization.slug}`,
         secretFingerprint: `${organization.slug}-secret`,
         certificateIssuedAt: new Date("2026-04-01T09:00:00.000Z"),

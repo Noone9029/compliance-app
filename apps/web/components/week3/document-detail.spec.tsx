@@ -108,6 +108,11 @@ describe("DocumentDetail", () => {
             externalSubmissionId: "clearance-uuid",
             clearedAt: "2026-04-13T10:00:00.000Z",
             reportedAt: null,
+            localValidation: {
+              status: "PASSED",
+              warnings: ["Tag order differs from canonical sort."],
+              errors: [],
+            },
             retryAllowed: false,
             canShareWithCustomer: true,
             submission: {
@@ -125,6 +130,9 @@ describe("DocumentDetail", () => {
               failureCategory: null,
               externalSubmissionId: "clearance-uuid",
               errorMessage: null,
+              requestId: "REQ-INV-NE-0001",
+              warnings: ["Rounded tax value adjusted by gateway."],
+              errors: [],
               createdAt: "2026-04-13T09:55:00.000Z",
               updatedAt: "2026-04-13T10:00:00.000Z"
             },
@@ -142,6 +150,9 @@ describe("DocumentDetail", () => {
                 failureCategory: null,
                 externalSubmissionId: "clearance-uuid",
                 errorMessage: null,
+                requestId: "REQ-INV-NE-0001",
+                warnings: ["Rounded tax value adjusted by gateway."],
+                errors: [],
                 startedAt: "2026-04-13T09:59:00.000Z",
                 finishedAt: "2026-04-13T10:00:00.000Z"
               }
@@ -202,6 +213,9 @@ describe("DocumentDetail", () => {
     expect(screen.getByText("Operating Account")).toBeTruthy();
     expect(screen.getByText("Transport Attempts")).toBeTruthy();
     expect(screen.getByText("Compliance Timeline")).toBeTruthy();
+    expect(screen.getByText("Local SDK Validation")).toBeTruthy();
+    expect(screen.getAllByText("REQ-INV-NE-0001").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/Rounded tax value adjusted by gateway\./).length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders quote conversion link when a quote has been converted", () => {

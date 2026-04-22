@@ -47,7 +47,16 @@ describe.sequential("Daftar Week 4 extensions", () => {
       where: { organizationId: eventsOrg.id, code: "VAT15" }
     });
     const invoice = await prisma.salesInvoice.findFirstOrThrow({
-      where: { organizationId: eventsOrg.id }
+      where: {
+        organizationId: eventsOrg.id,
+        status: {
+          in: ["ISSUED", "PARTIALLY_PAID", "PAID", "REPORTED"]
+        },
+        total: {
+          gte: "230.00"
+        }
+      },
+      orderBy: [{ total: "desc" }, { createdAt: "asc" }]
     });
     const customer = await prisma.contact.findUniqueOrThrow({
       where: { id: invoice.contactId }

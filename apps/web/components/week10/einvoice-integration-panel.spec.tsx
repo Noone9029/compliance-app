@@ -14,6 +14,7 @@ describe("EInvoiceIntegrationPanel", () => {
   it("renders onboarding posture and compliance timeline", () => {
     render(
       <EInvoiceIntegrationPanel
+        canManageLifecycle
         canWrite
         integration={{
           organizationName: "Nomad Events Arabia Limited",
@@ -79,12 +80,43 @@ describe("EInvoiceIntegrationPanel", () => {
     );
 
     expect(screen.getByText("Compliance Timeline")).toBeTruthy();
+    expect(screen.getByText("Onboarding Lifecycle")).toBeTruthy();
+    expect(screen.getByText("Prepare Draft")).toBeTruthy();
+    expect(screen.getByText("Generate CSR")).toBeTruthy();
     expect(screen.getByText("compliance.integration.onboarded")).toBeTruthy();
     expect(
       screen.getByText((content, element) =>
-        element?.textContent === "Device: Nomad Events Arabia Limited EGS Unit"
+        element?.textContent === "Device Name: Nomad Events Arabia Limited EGS Unit"
       )
     ).toBeTruthy();
-    expect(screen.queryByText("Details")).toBeNull();
+    expect(screen.getByText("Save Payment Means")).toBeTruthy();
+  });
+
+  it("shows lifecycle access warning when admin permissions are missing", () => {
+    render(
+      <EInvoiceIntegrationPanel
+        canManageLifecycle={false}
+        canWrite
+        integration={{
+          organizationName: "Nomad Events Arabia Limited",
+          legalName: "Nomad Events Arabia Limited",
+          taxNumber: "300123456700003",
+          registrationNumber: "CR-1010998877",
+          environment: "Sandbox",
+          integrationDate: null,
+          status: "NOT_REGISTERED",
+          onboarding: null,
+          timeline: [],
+          mappings: [],
+          availablePaymentMeans: [],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "Lifecycle actions are admin-only. You need organization management access.",
+      ),
+    ).toBeTruthy();
   });
 });

@@ -707,6 +707,14 @@ function ComplianceResponseCard({
               "---"
             }
           />
+          <ComplianceValue
+            label="Request ID"
+            value={
+              compliance?.submission?.requestId ??
+              compliance?.attempts.find((attempt) => attempt.requestId)?.requestId ??
+              "---"
+            }
+          />
           <ComplianceValue label="Invoice Counter" value={String(compliance?.invoiceCounter ?? "---")} />
           <ComplianceValue label="Current Hash" value={compliance?.currentHash ?? "---"} />
           <ComplianceValue
@@ -738,6 +746,52 @@ function ComplianceResponseCard({
                 label="Error"
                 value={compliance.submission.errorMessage ?? "---"}
               />
+              <ComplianceValue
+                label="Request ID"
+                value={compliance.submission.requestId ?? "---"}
+              />
+            </CardContent>
+            {compliance.submission.warnings.length || compliance.submission.errors.length ? (
+              <CardContent className="space-y-2 pt-0 text-sm">
+                {compliance.submission.warnings.length ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">
+                    <p className="font-medium">ZATCA Warnings</p>
+                    <p>{compliance.submission.warnings.join(" | ")}</p>
+                  </div>
+                ) : null}
+                {compliance.submission.errors.length ? (
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
+                    <p className="font-medium">ZATCA Errors</p>
+                    <p>{compliance.submission.errors.join(" | ")}</p>
+                  </div>
+                ) : null}
+              </CardContent>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {compliance?.localValidation ? (
+          <Card className="border-slate-200 shadow-none">
+            <CardHeader>
+              <h4 className="text-base font-semibold text-slate-950">Local SDK Validation</h4>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <ComplianceValue
+                label="Validation Status"
+                value={formatStatusLabel(compliance.localValidation.status)}
+              />
+              {compliance.localValidation.warnings.length ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">
+                  <p className="font-medium">Warnings</p>
+                  <p>{compliance.localValidation.warnings.join(" | ")}</p>
+                </div>
+              ) : null}
+              {compliance.localValidation.errors.length ? (
+                <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
+                  <p className="font-medium">Errors</p>
+                  <p>{compliance.localValidation.errors.join(" | ")}</p>
+                </div>
+              ) : null}
             </CardContent>
           </Card>
         ) : null}
@@ -763,6 +817,17 @@ function ComplianceResponseCard({
                       ? ` • Finished ${formatReportedAt(attempt.finishedAt)}`
                       : ""}
                   </p>
+                  {attempt.requestId ? (
+                    <p className="text-slate-600">Request ID: {attempt.requestId}</p>
+                  ) : null}
+                  {attempt.warnings.length ? (
+                    <p className="text-amber-700">
+                      Warnings: {attempt.warnings.join(" | ")}
+                    </p>
+                  ) : null}
+                  {attempt.errors.length ? (
+                    <p className="text-rose-700">Errors: {attempt.errors.join(" | ")}</p>
+                  ) : null}
                   <p className="text-slate-600">
                     {attempt.errorMessage ??
                       formatStatusLabel(attempt.failureCategory) ??

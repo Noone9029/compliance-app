@@ -18,6 +18,8 @@ export async function renderCompliancePage(orgSlug: string) {
   const capabilities = await getCapabilities();
   const canReport = hasPermission(capabilities, "compliance.report");
   const canWrite = hasPermission(capabilities, "compliance.write");
+  const canManageLifecycle =
+    canWrite && hasPermission(capabilities, "platform.org.manage");
   const [overview, invoices, integration] = await Promise.all([
     fetchServerJson<ComplianceOverviewRecord>("/v1/compliance/overview"),
     fetchServerJson<SalesInvoiceSummary[]>("/v1/sales/invoices"),
@@ -38,7 +40,11 @@ export async function renderCompliancePage(orgSlug: string) {
 
   return (
     <div className="space-y-6">
-      <EInvoiceIntegrationPanel canWrite={canWrite} integration={integration} />
+      <EInvoiceIntegrationPanel
+        canManageLifecycle={canManageLifecycle}
+        canWrite={canWrite}
+        integration={integration}
+      />
 
       <div className="grid gap-4 md:grid-cols-4">
         <MetricCard label="Invoices Ready" value={String(overview.totalInvoicesReady)} />
@@ -132,6 +138,7 @@ export async function renderCompliancePage(orgSlug: string) {
                     <th className="px-3 py-2 font-medium">Document</th>
                     <th className="px-3 py-2 font-medium">Status</th>
                     <th className="px-3 py-2 font-medium">Response</th>
+                    <th className="px-3 py-2 font-medium">Request</th>
                     <th className="px-3 py-2 font-medium">Submitted</th>
                   </tr>
                 </thead>
@@ -148,6 +155,11 @@ export async function renderCompliancePage(orgSlug: string) {
                       <td className="px-3 py-3">
                         {document.responseCode ?? "No code"}
                         {document.responseMessage ? ` • ${document.responseMessage}` : ""}
+                      </td>
+                      <td className="px-3 py-3">
+                        {document.externalSubmissionId ??
+                          document.failureCategory ??
+                          "No request id"}
                       </td>
                       <td className="px-3 py-3">{formatDate(document.submittedAt)}</td>
                     </tr>

@@ -40,6 +40,12 @@ function acceptedDocumentStatus(flow: "CLEARANCE" | "REPORTING", warned: boolean
   return warned ? "REPORTED_WITH_WARNINGS" : "REPORTED";
 }
 
+function acceptedEventAction(warned: boolean) {
+  return warned
+    ? "compliance.invoice.accepted_with_warnings"
+    : "compliance.invoice.accepted";
+}
+
 function failureDocumentStatus(
   retryable: boolean,
   category: ComplianceFailureCategory,
@@ -152,7 +158,7 @@ export async function processComplianceSubmission(input: {
     complianceDocumentId: complianceDocument.id,
     complianceOnboardingId: complianceDocument.onboardingId ?? null,
     zatcaSubmissionId: submission.id,
-    action: "compliance.submission.processing",
+    action: "compliance.invoice.submission_started",
     status: "PROCESSING",
     message: "Submission is being processed by the compliance worker.",
   });
@@ -166,7 +172,10 @@ export async function processComplianceSubmission(input: {
       attemptNumber,
       flow: submission.flow,
       status: "PROCESSING",
-      endpoint: transport.endpointFor(submission.flow),
+      endpoint: transport.endpointFor(
+        submission.flow,
+        complianceDocument.onboarding?.environment ?? null,
+      ),
       requestPayload: {
         invoiceNumber: salesInvoice.invoiceNumber,
         invoiceHash: complianceDocument.currentHash,
@@ -175,10 +184,16 @@ export async function processComplianceSubmission(input: {
   });
 
   try {
+    const onboardingExpired = Boolean(
+      complianceDocument.onboarding?.certificateExpiresAt &&
+        complianceDocument.onboarding.certificateExpiresAt <= new Date(),
+    );
     if (
       !complianceDocument.onboarding ||
       complianceDocument.onboarding.status !== "ACTIVE" ||
-      complianceDocument.onboarding.certificateStatus !== "ACTIVE"
+      complianceDocument.onboarding.certificateStatus !== "ACTIVE" ||
+      complianceDocument.onboarding.revokedAt !== null ||
+      onboardingExpired
     ) {
       throw new ComplianceTransportError({
         message: "Compliance onboarding is not active for this organization/device.",
@@ -215,7 +230,12 @@ export async function processComplianceSubmission(input: {
         status: result.status,
         retryable: false,
         externalSubmissionId: result.externalSubmissionId,
-        responsePayload: result.responsePayload as Prisma.InputJsonValue,
+        responsePayload: {
+          ...result.responsePayload,
+          requestId: result.requestId,
+          warnings: result.warnings,
+          errors: result.errors,
+        } as Prisma.InputJsonValue,
         finishedAt: completedAt,
       },
     });
@@ -233,7 +253,13 @@ export async function processComplianceSubmission(input: {
         errorMessage: null,
         failureCategory: null,
         externalSubmissionId: result.externalSubmissionId,
-        responsePayload: result.responsePayload as Prisma.InputJsonValue,
+        responsePayload: {
+          ...result.responsePayload,
+          requestId: result.requestId,
+          warnings: result.warnings,
+          errors: result.errors,
+          stampedXmlAvailable: Boolean(result.stampedXmlContent),
+        } as Prisma.InputJsonValue,
       },
     });
 
@@ -246,6 +272,11 @@ export async function processComplianceSubmission(input: {
         lastError: null,
         failureCategory: null,
         externalSubmissionId: result.externalSubmissionId,
+        ...(result.stampedXmlContent
+          ? {
+              xmlContent: result.stampedXmlContent,
+            }
+          : {}),
         ...(submission.flow === "CLEARANCE"
           ? { clearedAt: completedAt }
           : { reportedAt: completedAt }),
@@ -288,13 +319,16 @@ export async function processComplianceSubmission(input: {
       complianceDocumentId: complianceDocument.id,
       complianceOnboardingId: complianceDocument.onboardingId ?? null,
       zatcaSubmissionId: submission.id,
-      action:
-        submission.flow === "CLEARANCE"
-          ? "compliance.invoice.cleared"
-          : "compliance.invoice.reported",
+      action: acceptedEventAction(warned),
       status: nextDocumentStatus,
       message: result.responseMessage,
-      metadata: result.responsePayload as Prisma.InputJsonValue,
+      metadata: {
+        flow: submission.flow,
+        ...result.responsePayload,
+        requestId: result.requestId,
+        warnings: result.warnings,
+        errors: result.errors,
+      } as Prisma.InputJsonValue,
     });
 
     await input.prisma.invoiceStatusEvent.create({
@@ -311,6 +345,8 @@ export async function processComplianceSubmission(input: {
           complianceDocumentId: complianceDocument.id,
           submissionId: submission.id,
           externalSubmissionId: result.externalSubmissionId,
+          requestId: result.requestId,
+          warnings: result.warnings,
         } as Prisma.InputJsonValue,
       },
     });
@@ -331,9 +367,13 @@ export async function processComplianceSubmission(input: {
           });
     const retryable =
       transportError.retryable && attemptNumber < Math.max(submission.maxAttempts, 1);
-    const nextRetryAt = retryable
-      ? new Date(Date.now() + calculateRetryDelayMs(attemptNumber))
+    const retryDelayMs = retryable
+      ? calculateRetryDelayMs(attemptNumber, {
+          failureCategory: transportError.category,
+          statusCode: transportError.statusCode,
+        })
       : null;
+    const nextRetryAt = retryable ? new Date(Date.now() + retryDelayMs!) : null;
     const nextSubmissionStatus = failureSubmissionStatus(
       retryable,
       transportError.category,
@@ -452,7 +492,7 @@ export async function processComplianceSubmission(input: {
             delayMs,
           });
         });
-      await enqueueRetry(submission.id, calculateRetryDelayMs(attemptNumber));
+      await enqueueRetry(submission.id, retryDelayMs!);
     }
 
     return {

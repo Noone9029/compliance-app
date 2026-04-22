@@ -45,6 +45,20 @@ const submitOtpSchema = z.object({
   otpCode: z.string().min(6).max(12),
 });
 
+const renewOnboardingSchema = z.object({
+  otpCode: z.string().min(6).max(12),
+});
+
+const revokeOnboardingSchema = z.object({
+  reason: z.string().min(1).max(200).optional(),
+});
+
+function requireComplianceLifecycleAdmin(
+  session: AuthenticatedRequest["currentSession"],
+) {
+  requirePermission(session, "platform.org.manage");
+}
+
 @Controller("v1/compliance")
 @UseGuards(AuthenticatedGuard)
 export class ComplianceController {
@@ -103,6 +117,7 @@ export class ComplianceController {
     @Body() body: unknown,
   ) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const parsed = prepareOnboardingSchema.parse(body);
     const onboarding = await this.complianceService.prepareOnboarding(
       session!.organization!.id,
@@ -126,6 +141,7 @@ export class ComplianceController {
     @Param("id") onboardingId: string,
   ) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const onboarding = await this.complianceService.generateCsrForOnboarding(
       session!.organization!.id,
       onboardingId,
@@ -148,6 +164,7 @@ export class ComplianceController {
     @Param("id") onboardingId: string,
   ) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const onboarding = await this.complianceService.markOtpPending(
       session!.organization!.id,
       onboardingId,
@@ -171,6 +188,7 @@ export class ComplianceController {
     @Body() body: unknown,
   ) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const parsed = submitOtpSchema.parse(body);
     const onboarding = await this.complianceService.submitOtp(
       session!.organization!.id,
@@ -189,6 +207,89 @@ export class ComplianceController {
     return onboarding;
   }
 
+  @Post("onboarding/:id/activate")
+  async activateOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+  ) {
+    requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
+    const onboarding = await this.complianceService.activateOnboarding(
+      session!.organization!.id,
+      onboardingId,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.activate",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Post("onboarding/:id/renew")
+  async renewOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
+    const parsed = renewOnboardingSchema.parse(body);
+    const onboarding = await this.complianceService.renewOnboarding(
+      session!.organization!.id,
+      onboardingId,
+      parsed,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.renew",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Post("onboarding/:id/revoke")
+  async revokeOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("id") onboardingId: string,
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
+    const parsed = revokeOnboardingSchema.parse(body);
+    const onboarding = await this.complianceService.revokeOnboarding(
+      session!.organization!.id,
+      onboardingId,
+      parsed,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.onboarding.revoke",
+      targetType: "compliance_onboarding",
+      targetId: onboarding.id,
+      result: "SUCCESS",
+    });
+    return onboarding;
+  }
+
+  @Get("onboarding/current")
+  getCurrentOnboarding(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+  ) {
+    requirePermission(session, "compliance.read");
+    return this.complianceService.getCurrentOnboarding(session!.organization!.id);
+  }
+
   @Get("onboarding/:id")
   getOnboarding(
     @CurrentSession() session: AuthenticatedRequest["currentSession"],
@@ -204,6 +305,7 @@ export class ComplianceController {
   @Post("integration/onboard")
   async onboard(@CurrentSession() session: AuthenticatedRequest["currentSession"]) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const integration = await this.complianceService.onboard(session!.organization!.id);
     await this.auditService.log({
       organizationId: session!.organization!.id,
@@ -220,6 +322,7 @@ export class ComplianceController {
   @Post("integration/renew")
   async renew(@CurrentSession() session: AuthenticatedRequest["currentSession"]) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const integration = await this.complianceService.renewIntegration(
       session!.organization!.id,
     );
@@ -238,6 +341,7 @@ export class ComplianceController {
   @Post("integration/remove")
   async remove(@CurrentSession() session: AuthenticatedRequest["currentSession"]) {
     requirePermission(session, "compliance.write");
+    requireComplianceLifecycleAdmin(session);
     const integration = await this.complianceService.removeIntegration(
       session!.organization!.id,
     );

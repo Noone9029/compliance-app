@@ -58,7 +58,16 @@ describe.sequential("worker compliance processing", () => {
             taxDetail: true,
           },
         },
-        contact: true,
+        contact: {
+          include: {
+            addresses: true,
+          },
+        },
+        lines: {
+          orderBy: {
+            sortOrder: "asc",
+          },
+        },
       },
     });
     await prisma.reportedDocument.deleteMany({
@@ -115,13 +124,73 @@ describe.sequential("worker compliance processing", () => {
           invoiceKind: invoice.complianceInvoiceKind,
           submissionFlow,
           issueDateIso: invoice.issueDate.toISOString(),
-          sellerName: invoice.organization.taxDetail!.legalName,
-          taxNumber: invoice.organization.taxDetail!.taxNumber,
-          customerName: invoice.contact.displayName,
           invoiceCounter: 1,
-          total: invoice.total.toString(),
-          taxTotal: invoice.taxTotal.toString(),
           previousHash: hashes.previousHash,
+          qrPayload: buildQrPayload({
+            sellerName: invoice.organization.taxDetail!.legalName,
+            taxNumber: invoice.organization.taxDetail!.taxNumber,
+            issuedAtIso: invoice.issueDate.toISOString(),
+            total: invoice.total.toString(),
+            taxTotal: invoice.taxTotal.toString(),
+            invoiceHash: hashes.currentHash,
+          }),
+          currencyCode: invoice.currencyCode,
+          seller: {
+            registrationName: invoice.organization.taxDetail!.legalName,
+            taxNumber: invoice.organization.taxDetail!.taxNumber,
+            registrationNumber: invoice.organization.taxDetail!.registrationNumber,
+            address: {
+              streetName: invoice.organization.taxDetail!.addressLine1,
+              additionalStreetName: invoice.organization.taxDetail!.addressLine2,
+              cityName: invoice.organization.taxDetail!.city,
+              postalZone: invoice.organization.taxDetail!.postalCode,
+              countryCode: invoice.organization.taxDetail!.countryCode,
+            },
+          },
+          buyer: {
+            registrationName:
+              invoice.contact.companyName ?? invoice.contact.displayName,
+            taxNumber: invoice.contact.taxNumber,
+            address: (() => {
+              const primaryAddress =
+                invoice.contact.addresses.find((address) => address.type === "BILLING") ??
+                invoice.contact.addresses[0];
+              return primaryAddress
+                ? {
+                    streetName: primaryAddress.line1,
+                    additionalStreetName: primaryAddress.line2,
+                    cityName: primaryAddress.city,
+                    postalZone: primaryAddress.postalCode,
+                    countryCode: primaryAddress.countryCode,
+                  }
+                : null;
+            })(),
+          },
+          subtotal: invoice.subtotal.toString(),
+          taxTotal: invoice.taxTotal.toString(),
+          total: invoice.total.toString(),
+          lines:
+            invoice.lines.length > 0
+              ? invoice.lines.map((line) => ({
+                  description: line.description,
+                  quantity: line.quantity.toString(),
+                  unitPrice: line.unitPrice.toString(),
+                  lineExtensionAmount: line.lineSubtotal.toString(),
+                  taxAmount: line.lineTax.toString(),
+                  taxRatePercent: line.taxRatePercent.toString(),
+                  taxRateName: line.taxRateName,
+                }))
+              : [
+                  {
+                    description: "Worker test line",
+                    quantity: "1.00",
+                    unitPrice: invoice.subtotal.toString(),
+                    lineExtensionAmount: invoice.subtotal.toString(),
+                    taxAmount: invoice.taxTotal.toString(),
+                    taxRatePercent: "15.00",
+                    taxRateName: "VAT 15%",
+                  },
+                ],
         }),
         status: "QUEUED",
         lastSubmissionStatus: "QUEUED",
@@ -225,7 +294,7 @@ describe.sequential("worker compliance processing", () => {
     expect(stored.attempts[0]?.failureCategory).toBe("ZATCA_REJECTION");
   });
 
-  it("fails queued submissions when onboarding is no longer active in the worker path", async () => {
+  it("fails queued submissions when onboarding has been revoked in the worker path", async () => {
     const invoice = await prisma.salesInvoice.findFirstOrThrow({
       where: {
         invoiceNumber: "INV-NE-0001",
@@ -241,6 +310,7 @@ describe.sequential("worker compliance processing", () => {
       select: {
         status: true,
         certificateStatus: true,
+        revokedAt: true,
       },
     });
 
@@ -248,8 +318,9 @@ describe.sequential("worker compliance processing", () => {
       await prisma.complianceOnboarding.update({
         where: { id: seeded.onboardingId },
         data: {
-          status: "DRAFT",
-          certificateStatus: "CSR_GENERATED",
+          status: "ACTIVE",
+          certificateStatus: "ACTIVE",
+          revokedAt: new Date(),
         },
       });
 
@@ -290,6 +361,7 @@ describe.sequential("worker compliance processing", () => {
         data: {
           status: onboardingBefore.status,
           certificateStatus: onboardingBefore.certificateStatus,
+          revokedAt: onboardingBefore.revokedAt,
         },
       });
     }

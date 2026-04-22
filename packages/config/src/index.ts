@@ -38,7 +38,9 @@ export const baseEnvSchema = z.object({
     .default("connector-secrets-local-dev-key"),
   ZOHO_CLIENT_ID: z.string().min(1).default("placeholder"),
   ZOHO_CLIENT_SECRET: z.string().min(1).default("placeholder"),
-  ZATCA_BASE_URL: z.string().min(1).default("https://sandbox.example.zatca.gov.sa"),
+  ZATCA_BASE_URL: z.string().min(1).default("https://gw-fatoora.zatca.gov.sa"),
+  ZATCA_SDK_CLI_PATH: z.string().min(1).default("fatoora"),
+  ZATCA_LOCAL_VALIDATION_MODE: z.enum(["required", "best-effort"]).default("required"),
   ZATCA_CLIENT_ID: z.string().min(1).default("placeholder"),
   ZATCA_CLIENT_SECRET: z.string().min(1).default("placeholder")
 });

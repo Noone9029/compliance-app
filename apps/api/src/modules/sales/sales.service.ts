@@ -30,6 +30,43 @@ function money(value: { toString(): string } | string | number | null | undefine
 
 type PrismaClientLike = PrismaService | Prisma.TransactionClient;
 
+function extractTransportMessages(payload: Prisma.JsonValue | null | undefined) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      requestId: null,
+      warnings: [] as string[],
+      errors: [] as string[],
+    };
+  }
+
+  const data = payload as Record<string, unknown>;
+  const normalizeMessages = (value: unknown) =>
+    Array.isArray(value)
+      ? value
+          .map((entry) => {
+            if (typeof entry === "string") {
+              return entry.trim();
+            }
+            if (entry && typeof entry === "object") {
+              const message = (entry as { message?: unknown }).message;
+              return typeof message === "string" ? message.trim() : "";
+            }
+            return "";
+          })
+          .filter((entry): entry is string => entry.length > 0)
+      : [];
+  const requestId =
+    typeof data.requestId === "string" && data.requestId.trim().length > 0
+      ? data.requestId.trim()
+      : null;
+
+  return {
+    requestId,
+    warnings: normalizeMessages(data.warnings),
+    errors: normalizeMessages(data.errors),
+  };
+}
+
 @Injectable()
 export class SalesService {
   private readonly prisma: PrismaService;
@@ -217,7 +254,16 @@ export class SalesService {
         createdAt: event.createdAt.toISOString()
       })),
       compliance: invoice.complianceDocument
-        ? {
+        ? (() => {
+            const submissionMessages = invoice.complianceDocument.submission
+              ? extractTransportMessages(invoice.complianceDocument.submission.responsePayload)
+              : {
+                  requestId: null,
+                  warnings: [] as string[],
+                  errors: [] as string[],
+                };
+
+            return {
             id: invoice.complianceDocument.id,
             salesInvoiceId: invoice.complianceDocument.salesInvoiceId,
             invoiceKind: invoice.complianceDocument.invoiceKind,
@@ -241,6 +287,7 @@ export class SalesService {
               invoice.complianceDocument.clearedAt?.toISOString() ?? null,
             reportedAt:
               invoice.complianceDocument.reportedAt?.toISOString() ?? null,
+            localValidation: null,
             retryAllowed: Boolean(
               invoice.complianceDocument.submission &&
                 invoice.complianceDocument.submission.attemptCount <
@@ -283,6 +330,9 @@ export class SalesService {
                     null,
                   errorMessage:
                     invoice.complianceDocument.submission.errorMessage ?? null,
+                  requestId: submissionMessages.requestId,
+                  warnings: submissionMessages.warnings,
+                  errors: submissionMessages.errors,
                   createdAt:
                     invoice.complianceDocument.submission.createdAt.toISOString(),
                   updatedAt:
@@ -303,6 +353,9 @@ export class SalesService {
                   failureCategory: attempt.failureCategory ?? null,
                   externalSubmissionId: attempt.externalSubmissionId ?? null,
                   errorMessage: attempt.errorMessage ?? null,
+                  requestId: extractTransportMessages(attempt.responsePayload).requestId,
+                  warnings: extractTransportMessages(attempt.responsePayload).warnings,
+                  errors: extractTransportMessages(attempt.responsePayload).errors,
                   startedAt: attempt.startedAt.toISOString(),
                   finishedAt: attempt.finishedAt?.toISOString() ?? null
                 }))
@@ -316,7 +369,8 @@ export class SalesService {
             })),
             createdAt: invoice.complianceDocument.createdAt.toISOString(),
             updatedAt: invoice.complianceDocument.updatedAt.toISOString()
-          }
+          };
+          })()
         : null
     };
   }
