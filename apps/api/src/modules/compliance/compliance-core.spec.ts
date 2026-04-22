@@ -6,39 +6,15 @@ import {
   buildQrPayload,
   calculateRetryDelayMs,
   complianceFlowForInvoiceKind,
+  decodeQrTlv,
   firstPreviousInvoiceHash,
   generateComplianceUuid,
   hashValue,
   nextInvoiceCounter,
 } from "./compliance-core";
 
-function decodeTlvPayload(base64: string) {
-  const bytes = Buffer.from(base64, "base64");
-  const decoded = new Map<number, string>();
-  let offset = 0;
-
-  while (offset < bytes.length) {
-    const tag = bytes[offset++]!;
-    if (offset >= bytes.length) {
-      break;
-    }
-
-    const firstLengthByte = bytes[offset++]!;
-    let length = firstLengthByte;
-    if (firstLengthByte > 0x80) {
-      const lengthBytes = firstLengthByte & 0x7f;
-      length = 0;
-      for (let index = 0; index < lengthBytes; index += 1) {
-        length = (length << 8) | (bytes[offset++] ?? 0);
-      }
-    }
-
-    const value = bytes.subarray(offset, offset + length).toString("utf8");
-    decoded.set(tag, value);
-    offset += length;
-  }
-
-  return decoded;
+function tlvValueMap(base64: string) {
+  return new Map(decodeQrTlv(base64).map((entry) => [entry.tag, entry.value]));
 }
 
 describe("compliance-core", () => {
@@ -58,16 +34,20 @@ describe("compliance-core", () => {
   });
 
   it("builds a base64 qr payload and chained hashes", () => {
+    const invoiceHashBytes = Buffer.from("6f1f89b6ab3cd41f11a9fb6ccb906764", "hex");
+    const signatureBytes = Buffer.from("30440220111122223333444455556666777788889999aaaabbbbccccddddeeeeffff00000220123456789abcdeffedcba98765432100112233445566778899aabbccddeeff", "hex");
+    const publicKeyBytes = Buffer.from("3056301006072a8648ce3d020106052b8104000a034200040102030405060708090a0b0c0d0e0f00112233445566778899aabbccddeeff112233445566778899aabbccddeeff0011223344556677", "hex");
+    const technicalStampBytes = Buffer.from("3045022100aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55022055aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa", "hex");
     const qrPayload = buildQrPayload({
       sellerName: "Nomad Events Arabia Limited",
       taxNumber: "300123456700003",
       issuedAtIso: "2026-04-12T09:00:00.000Z",
       total: "115.00",
       taxTotal: "15.00",
-      invoiceHash: "invoice-hash",
-      xmlSignature: "signature",
-      publicKey: "public-key",
-      technicalStamp: "technical-stamp",
+      invoiceHash: invoiceHashBytes.toString("base64"),
+      xmlSignature: signatureBytes.toString("base64"),
+      publicKey: publicKeyBytes.toString("base64"),
+      technicalStamp: technicalStampBytes.toString("base64"),
     });
     const hashes = buildComplianceHashes({
       previousHash: "previous-hash-value",
@@ -80,13 +60,13 @@ describe("compliance-core", () => {
     });
 
     expect(qrPayload).toMatch(/^[A-Za-z0-9+/=]+$/);
-    const decoded = decodeTlvPayload(qrPayload);
-    expect(decoded.get(1)).toBe("Nomad Events Arabia Limited");
-    expect(decoded.get(2)).toBe("300123456700003");
-    expect(decoded.get(6)).toBe("invoice-hash");
-    expect(decoded.get(7)).toBe("signature");
-    expect(decoded.get(8)).toBe("public-key");
-    expect(decoded.get(9)).toBe("technical-stamp");
+    const decoded = tlvValueMap(qrPayload);
+    expect(decoded.get(1)?.toString("utf8")).toBe("Nomad Events Arabia Limited");
+    expect(decoded.get(2)?.toString("utf8")).toBe("300123456700003");
+    expect(decoded.get(6)?.toString("utf8")).toBe(invoiceHashBytes.toString("base64"));
+    expect(decoded.get(7)?.toString("utf8")).toBe(signatureBytes.toString("base64"));
+    expect(decoded.get(8)?.equals(publicKeyBytes)).toBe(true);
+    expect(decoded.get(9)?.equals(technicalStampBytes)).toBe(true);
     expect(hashes.previousHash).toBe("previous-hash-value");
     expect(hashes.currentHash).toMatch(/^[A-Za-z0-9+/=]+$/);
   });

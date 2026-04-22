@@ -150,18 +150,52 @@ describe("compliance-crypto.service", () => {
   it("produces xades-style signature material and injects it into invoice XML", async () => {
     const generated = await service.generateCsr(baseInput);
     const xml = sampleInvoiceXml();
+    const certificatePem = sampleCertificatePem();
+    const certificate = new x509.X509Certificate(certificatePem);
     const signed = await service.signPhase2Invoice({
       xmlContent: xml,
       privateKeyPem: generated.privateKeyPem,
-      certificatePem: sampleCertificatePem(),
+      certificatePem,
     });
 
     expect(signed.invoiceHash).toMatch(/^[A-Za-z0-9+/=]+$/);
     expect(signed.xmlSignature).toMatch(/^[A-Za-z0-9+/=]+$/);
-    expect(signed.publicKey).toMatch(/^[A-Za-z0-9+/=]+$/);
-    expect(signed.technicalStamp).toMatch(/^[A-Za-z0-9+/=]+$/);
+    expect(signed.publicKey).toBe(
+      Buffer.from(certificate.publicKey.rawData).toString("base64"),
+    );
+    expect(signed.technicalStamp).toBe(
+      Buffer.from(certificate.signature).toString("base64"),
+    );
     expect(signed.signedXmlContent).toContain("<ds:SignatureValue>");
     expect(signed.signedXmlContent).toContain("<xades:SignedProperties");
     expect(signed.signedXmlContent).toContain("<ds:X509Certificate>");
+  });
+
+  it("keeps deterministic hash and certificate-derived signature materials for fixed input", async () => {
+    const generated = await service.generateCsr(baseInput);
+    const xml = sampleInvoiceXml();
+    const signingTime = new Date("2026-04-18T10:15:30.000Z");
+    const certificatePem = sampleCertificatePem();
+
+    const first = await service.signPhase2Invoice({
+      xmlContent: xml,
+      privateKeyPem: generated.privateKeyPem,
+      certificatePem,
+      signingTime,
+    });
+    const second = await service.signPhase2Invoice({
+      xmlContent: xml,
+      privateKeyPem: generated.privateKeyPem,
+      certificatePem,
+      signingTime,
+    });
+
+    expect(first.invoiceHash).toBe(second.invoiceHash);
+    expect(first.publicKey).toBe(second.publicKey);
+    expect(first.technicalStamp).toBe(second.technicalStamp);
+    expect(first.certificateDigest).toBe(second.certificateDigest);
+    expect(first.signedPropertiesHash).toBe(second.signedPropertiesHash);
+    expect(first.signingTimeIso).toBe("2026-04-18T10:15:30");
+    expect(second.signingTimeIso).toBe("2026-04-18T10:15:30");
   });
 });

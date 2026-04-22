@@ -20,6 +20,12 @@ describe.runIf(sdkParityEnabled)("sdk parity validation suite", () => {
       const strictFixtures = report.fixtures.filter(
         (fixture) => fixture.strictParity,
       );
+      const strictQrMismatches = strictFixtures.flatMap((fixture) =>
+        fixture.mismatches.filter((mismatch) => mismatch.area === "qr"),
+      );
+      const strictHashMismatches = strictFixtures.flatMap((fixture) =>
+        fixture.mismatches.filter((mismatch) => mismatch.area === "hash"),
+      );
 
       expect(invalidFixture?.validation.sdkStatus).toBe("FAILED");
       expect(
@@ -27,6 +33,8 @@ describe.runIf(sdkParityEnabled)("sdk parity validation suite", () => {
         service.formatSummary(report),
       ).toBe(true);
       expect(validationMismatches.length, service.formatSummary(report)).toBe(0);
+      expect(strictHashMismatches.length, service.formatSummary(report)).toBe(0);
+      expect(strictQrMismatches.length, service.formatSummary(report)).toBe(0);
     },
     600_000,
   );

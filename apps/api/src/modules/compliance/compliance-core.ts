@@ -13,6 +13,11 @@ import {
 export const maxComplianceAttempts = 5;
 const genesisInvoiceValue = "0";
 
+export type QrTlvField = {
+  tag: number;
+  value: Buffer;
+};
+
 export function generateComplianceUuid() {
   return randomUUID();
 }
@@ -29,17 +34,114 @@ export function firstPreviousInvoiceHash() {
   return hashValueBase64(genesisInvoiceValue);
 }
 
-function tlvField(tag: number, value: string) {
-  const valueBuffer = Buffer.from(value, "utf8");
-  const length = valueBuffer.length;
-  const lengthBytes =
-    length < 0x80
-      ? Buffer.from([length])
-      : length <= 0xff
-        ? Buffer.from([0x81, length])
-        : Buffer.from([0x82, (length >> 8) & 0xff, length & 0xff]);
+function toQrValueBuffer(value: string | Buffer | Uint8Array) {
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+  return Buffer.from(value, "utf8");
+}
 
-  return Buffer.concat([Buffer.from([tag]), lengthBytes, valueBuffer]);
+function encodeTlvLength(length: number) {
+  if (length < 0x80) {
+    return Buffer.from([length]);
+  }
+  if (length <= 0xff) {
+    return Buffer.from([0x81, length]);
+  }
+  if (length <= 0xffff) {
+    return Buffer.from([0x82, (length >> 8) & 0xff, length & 0xff]);
+  }
+  throw new Error(`QR TLV length ${length} is not supported.`);
+}
+
+function decodeTlvLength(payload: Buffer, offset: number) {
+  if (offset >= payload.length) {
+    throw new Error("QR TLV is truncated before length bytes.");
+  }
+
+  const firstLengthByte = payload[offset] ?? 0;
+  let nextOffset = offset + 1;
+  if (firstLengthByte < 0x80) {
+    return { length: firstLengthByte, nextOffset };
+  }
+
+  const lengthBytesCount = firstLengthByte & 0x7f;
+  if (lengthBytesCount === 0 || lengthBytesCount > 2) {
+    throw new Error(`QR TLV uses unsupported length bytes count '${lengthBytesCount}'.`);
+  }
+
+  if (nextOffset + lengthBytesCount > payload.length) {
+    throw new Error("QR TLV is truncated while reading long-form length.");
+  }
+
+  let length = 0;
+  for (let index = 0; index < lengthBytesCount; index += 1) {
+    length = (length << 8) | (payload[nextOffset] ?? 0);
+    nextOffset += 1;
+  }
+
+  return { length, nextOffset };
+}
+
+function tlvField(tag: number, value: string | Buffer | Uint8Array) {
+  const valueBuffer = toQrValueBuffer(value);
+  return Buffer.concat([Buffer.from([tag]), encodeTlvLength(valueBuffer.length), valueBuffer]);
+}
+
+function isCanonicalBase64(value: string) {
+  const normalized = value.trim();
+  if (normalized.length === 0 || normalized.length % 4 !== 0) {
+    return false;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized)) {
+    return false;
+  }
+
+  const decoded = Buffer.from(normalized, "base64");
+  if (decoded.length === 0) {
+    return false;
+  }
+
+  const normalizedDecoded = decoded.toString("base64").replace(/=+$/u, "");
+  const normalizedInput = normalized.replace(/=+$/u, "");
+  return normalizedDecoded === normalizedInput;
+}
+
+function decodeQrBinaryValue(value: string) {
+  const normalized = value.trim();
+  if (!normalized) {
+    return Buffer.alloc(0);
+  }
+  if (isCanonicalBase64(normalized)) {
+    return Buffer.from(normalized, "base64");
+  }
+  return Buffer.from(normalized, "utf8");
+}
+
+export function decodeQrTlv(base64Payload: string): QrTlvField[] {
+  const payload = Buffer.from(base64Payload, "base64");
+  const fields: QrTlvField[] = [];
+  let offset = 0;
+
+  while (offset < payload.length) {
+    const tag = payload[offset] ?? 0;
+    offset += 1;
+
+    const { length, nextOffset } = decodeTlvLength(payload, offset);
+    offset = nextOffset;
+    if (offset + length > payload.length) {
+      throw new Error(`QR TLV tag '${tag}' is truncated.`);
+    }
+
+    const value = payload.subarray(offset, offset + length);
+    fields.push({ tag, value });
+    offset += length;
+  }
+
+  return fields;
 }
 
 export function buildQrPayload(input: {
@@ -62,19 +164,19 @@ export function buildQrPayload(input: {
   ];
 
   if (input.invoiceHash) {
-    fields.push(tlvField(6, input.invoiceHash));
+    fields.push(tlvField(6, input.invoiceHash.trim()));
   }
 
   if (input.xmlSignature) {
-    fields.push(tlvField(7, input.xmlSignature));
+    fields.push(tlvField(7, input.xmlSignature.trim()));
   }
 
   if (input.publicKey) {
-    fields.push(tlvField(8, input.publicKey));
+    fields.push(tlvField(8, decodeQrBinaryValue(input.publicKey)));
   }
 
   if (input.technicalStamp) {
-    fields.push(tlvField(9, input.technicalStamp));
+    fields.push(tlvField(9, decodeQrBinaryValue(input.technicalStamp)));
   }
 
   return Buffer.concat(fields).toString("base64");

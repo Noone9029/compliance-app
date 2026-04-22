@@ -203,9 +203,7 @@ export class ComplianceCryptoService {
     signer.end();
     const xmlSignature = signer.sign(input.privateKeyPem).toString("base64");
     const publicKey = Buffer.from(certificate.publicKey.rawData).toString("base64");
-    const technicalStamp = createHash("sha256")
-      .update(certificateBase64)
-      .digest("base64");
+    const technicalStamp = Buffer.from(certificate.signature).toString("base64");
     const signatureExtensionXml = buildInvoiceSignatureExtensionXml({
       invoiceDigestValue: invoiceHash,
       signedPropertiesDigestValue: signedPropertiesHash,
