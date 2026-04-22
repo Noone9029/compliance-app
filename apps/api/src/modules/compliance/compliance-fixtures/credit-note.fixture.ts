@@ -1,0 +1,61 @@
+import type { ComplianceParityFixture } from "./types";
+
+export const creditNoteFixture: ComplianceParityFixture = {
+  id: "credit-note",
+  title: "Standard Credit Note",
+  expectedValidation: "PASSED",
+  strictParity: true,
+  invoice: {
+    invoiceNumber: "INV-PARITY-CRN-0001",
+    invoiceKind: "STANDARD",
+    submissionFlow: "CLEARANCE",
+    documentType: "CREDIT_NOTE",
+    issueDateIso: "2026-04-22T12:00:00",
+    currencyCode: "SAR",
+    seller: {
+      registrationName: "Maximum Speed Tech Supply LTD",
+      taxNumber: "399999999900003",
+      registrationNumber: "1010010000",
+      address: {
+        streetName: "Prince Sultan",
+        buildingNumber: "2322",
+        citySubdivisionName: "Al Murabba",
+        cityName: "Riyadh",
+        postalZone: "23333",
+        countryCode: "SA",
+      },
+    },
+    buyer: {
+      registrationName: "Fatoora Samples LTD",
+      taxNumber: "399999999800003",
+      registrationNumber: "1010020000",
+      address: {
+        streetName: "Salah Al-Din",
+        buildingNumber: "1111",
+        citySubdivisionName: "Al Murooj",
+        cityName: "Riyadh",
+        postalZone: "12222",
+        countryCode: "SA",
+      },
+    },
+    deliveryDateIso: "2026-04-22T12:00:00.000Z",
+    paymentMeansCode: "30",
+    paymentInstructionNote: "Returned items adjustment",
+    billingReferenceId: "INV-ORIGINAL-0002",
+    subtotal: "50.00",
+    taxTotal: "7.50",
+    total: "57.50",
+    note: "Credit note parity fixture",
+    lines: [
+      {
+        description: "Returned item",
+        quantity: "1.00",
+        unitPrice: "50.00",
+        lineExtensionAmount: "50.00",
+        taxAmount: "7.50",
+        taxRatePercent: "15.00",
+        taxRateName: "VAT 15%",
+      },
+    ],
+  },
+};

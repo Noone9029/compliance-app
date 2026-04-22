@@ -1,0 +1,61 @@
+import type { ComplianceParityFixture } from "./types";
+
+export const debitNoteFixture: ComplianceParityFixture = {
+  id: "debit-note",
+  title: "Standard Debit Note",
+  expectedValidation: "PASSED",
+  strictParity: true,
+  invoice: {
+    invoiceNumber: "INV-PARITY-DBN-0001",
+    invoiceKind: "STANDARD",
+    submissionFlow: "CLEARANCE",
+    documentType: "DEBIT_NOTE",
+    issueDateIso: "2026-04-22T13:00:00",
+    currencyCode: "SAR",
+    seller: {
+      registrationName: "Maximum Speed Tech Supply LTD",
+      taxNumber: "399999999900003",
+      registrationNumber: "1010010000",
+      address: {
+        streetName: "Prince Sultan",
+        buildingNumber: "2322",
+        citySubdivisionName: "Al Murabba",
+        cityName: "Riyadh",
+        postalZone: "23333",
+        countryCode: "SA",
+      },
+    },
+    buyer: {
+      registrationName: "Fatoora Samples LTD",
+      taxNumber: "399999999800003",
+      registrationNumber: "1010020000",
+      address: {
+        streetName: "Salah Al-Din",
+        buildingNumber: "1111",
+        citySubdivisionName: "Al Murooj",
+        cityName: "Riyadh",
+        postalZone: "12222",
+        countryCode: "SA",
+      },
+    },
+    deliveryDateIso: "2026-04-22T13:00:00.000Z",
+    paymentMeansCode: "30",
+    paymentInstructionNote: "Post-issue amount adjustment",
+    billingReferenceId: "INV-ORIGINAL-0002",
+    subtotal: "80.00",
+    taxTotal: "12.00",
+    total: "92.00",
+    note: "Debit note parity fixture",
+    lines: [
+      {
+        description: "Adjustment item",
+        quantity: "1.00",
+        unitPrice: "80.00",
+        lineExtensionAmount: "80.00",
+        taxAmount: "12.00",
+        taxRatePercent: "15.00",
+        taxRateName: "VAT 15%",
+      },
+    ],
+  },
+};

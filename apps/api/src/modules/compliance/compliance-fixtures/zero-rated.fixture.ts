@@ -1,0 +1,60 @@
+import type { ComplianceParityFixture } from "./types";
+
+export const zeroRatedFixture: ComplianceParityFixture = {
+  id: "zero-rated",
+  title: "Zero Rated Standard Invoice",
+  expectedValidation: "PASSED",
+  strictParity: true,
+  invoice: {
+    invoiceNumber: "INV-PARITY-ZERO-0001",
+    invoiceKind: "STANDARD",
+    submissionFlow: "CLEARANCE",
+    issueDateIso: "2026-04-22T14:00:00",
+    currencyCode: "SAR",
+    seller: {
+      registrationName: "Maximum Speed Tech Supply LTD",
+      taxNumber: "399999999900003",
+      registrationNumber: "1010010000",
+      address: {
+        streetName: "Prince Sultan",
+        buildingNumber: "2322",
+        citySubdivisionName: "Al Murabba",
+        cityName: "Riyadh",
+        postalZone: "23333",
+        countryCode: "SA",
+      },
+    },
+    buyer: {
+      registrationName: "Export Customer LTD",
+      taxNumber: "399999999800003",
+      registrationNumber: "1010030000",
+      address: {
+        streetName: "King Fahd Road",
+        buildingNumber: "5005",
+        citySubdivisionName: "Al Olaya",
+        cityName: "Riyadh",
+        postalZone: "12221",
+        countryCode: "SA",
+      },
+    },
+    deliveryDateIso: "2026-04-22T14:00:00.000Z",
+    paymentMeansCode: "30",
+    subtotal: "120.00",
+    taxTotal: "0.00",
+    total: "120.00",
+    note: "Zero rated parity fixture",
+    lines: [
+      {
+        description: "Zero rated item",
+        quantity: "1.00",
+        unitPrice: "120.00",
+        lineExtensionAmount: "120.00",
+        taxAmount: "0.00",
+        taxRatePercent: "0.00",
+        taxRateName: "Zero Rated",
+        taxExemptionReasonCode: "VATEX-SA-35",
+        taxExemptionReason: "Medicines and medical equipment",
+      },
+    ],
+  },
+};

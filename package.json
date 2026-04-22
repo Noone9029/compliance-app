@@ -8,6 +8,7 @@
     "lint": "turbo run lint",
     "test": "turbo run test",
     "typecheck": "turbo run typecheck",
+    "sdk:parity": "node scripts/run-with-workspace-env.mjs node scripts/run-sdk-parity.mjs",
     "preview:up": "docker compose -f docker-compose.yml -f docker-compose.preview.yml up --build",
     "preview:down": "docker compose -f docker-compose.yml -f docker-compose.preview.yml down",
     "db:up": "docker compose up -d postgres redis",

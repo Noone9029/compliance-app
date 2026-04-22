@@ -14,6 +14,7 @@
     "start": "tsx src/main.ts",
     "lint": "tsc -p tsconfig.json --noEmit",
     "test": "pnpm --dir ../.. db:seed && vitest run --passWithNoTests",
+    "test:sdk-parity": "vitest run src/modules/compliance/sdk-parity.service.spec.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

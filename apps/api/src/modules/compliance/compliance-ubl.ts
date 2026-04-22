@@ -15,6 +15,8 @@ type InvoiceTypeFlags = {
 
 export type BuildInvoiceXmlAddressInput = {
   streetName?: string | null;
+  buildingNumber?: string | null;
+  citySubdivisionName?: string | null;
   additionalStreetName?: string | null;
   cityName?: string | null;
   postalZone?: string | null;
@@ -36,6 +38,8 @@ export type BuildInvoiceXmlLineInput = {
   taxAmount: number | string;
   taxRatePercent: number | string;
   taxRateName?: string | null;
+  taxExemptionReasonCode?: string | null;
+  taxExemptionReason?: string | null;
   unitCode?: string | null;
 };
 
@@ -54,6 +58,7 @@ export type BuildInvoiceXmlInput = {
   deliveryDateIso?: string | null;
   paymentMeansCode?: string | null;
   paymentInstructionNote?: string | null;
+  billingReferenceId?: string | null;
   subtotal: number | string;
   taxTotal: number | string;
   total: number | string;
@@ -90,6 +95,8 @@ type UblTaxSubtotal = {
   percent: string;
   taxableAmount: string;
   taxAmount: string;
+  taxExemptionReasonCode: string | null;
+  taxExemptionReason: string | null;
 };
 
 type UblInvoiceLine = {
@@ -102,11 +109,15 @@ type UblInvoiceLine = {
   itemName: string;
   taxCategoryCode: "S" | "Z" | "E" | "O";
   taxPercent: string;
+  taxExemptionReasonCode: string | null;
+  taxExemptionReason: string | null;
   priceAmount: string;
 };
 
 type UblAddress = {
   streetName: string | null;
+  buildingNumber: string | null;
+  citySubdivisionName: string | null;
   additionalStreetName: string | null;
   cityName: string | null;
   postalZone: string | null;
@@ -136,6 +147,7 @@ type UblInvoiceModel = {
   deliveryDate: string | null;
   paymentMeansCode: string | null;
   paymentInstructionNote: string | null;
+  billingReferenceId: string | null;
   taxTotal: string;
   legalMonetaryTotal: {
     lineExtensionAmount: string;
@@ -173,6 +185,16 @@ function quantity(value: number | string | null | undefined) {
 }
 
 function normalizeIssueDateParts(issueDateIso: string) {
+  const explicitSecondPrecision = issueDateIso.match(
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})$/,
+  );
+  if (explicitSecondPrecision) {
+    return {
+      issueDate: explicitSecondPrecision[1],
+      issueTime: explicitSecondPrecision[2],
+    };
+  }
+
   const issuedAt = new Date(issueDateIso);
   if (Number.isNaN(issuedAt.valueOf())) {
     return {
@@ -192,17 +214,44 @@ function normalizeCountryCode(value: string | null | undefined) {
   return (value ?? "SA").trim().toUpperCase() || "SA";
 }
 
-function normalizeAddress(input: BuildInvoiceXmlAddressInput | null | undefined): UblAddress | null {
-  if (!input) {
-    return null;
+type NormalizeAddressOptions = {
+  requireKsaCoreFields?: boolean;
+  forceCountryCode?: string | null;
+};
+
+function normalizeAddress(
+  input: BuildInvoiceXmlAddressInput | null | undefined,
+  options: NormalizeAddressOptions = {},
+): UblAddress | null {
+  const streetName = input?.streetName?.trim() || null;
+  const buildingNumber = input?.buildingNumber?.trim() || null;
+  const citySubdivisionName = input?.citySubdivisionName?.trim() || null;
+  const additionalStreetName = input?.additionalStreetName?.trim() || null;
+  const cityName = input?.cityName?.trim() || null;
+  const postalZone = input?.postalZone?.trim() || null;
+  const countryCode = normalizeCountryCode(options.forceCountryCode ?? input?.countryCode);
+
+  if (options.requireKsaCoreFields) {
+    return {
+      streetName: streetName ?? "Unknown Street",
+      buildingNumber: buildingNumber ?? "0000",
+      citySubdivisionName:
+        citySubdivisionName ?? additionalStreetName ?? cityName ?? "Unknown District",
+      additionalStreetName,
+      cityName: cityName ?? "Riyadh",
+      postalZone: postalZone ?? "00000",
+      countryCode: normalizeCountryCode(options.forceCountryCode ?? "SA"),
+    };
   }
 
-  const streetName = input.streetName?.trim() || null;
-  const additionalStreetName = input.additionalStreetName?.trim() || null;
-  const cityName = input.cityName?.trim() || null;
-  const postalZone = input.postalZone?.trim() || null;
-  const countryCode = normalizeCountryCode(input.countryCode);
-  const hasDetails = Boolean(streetName || additionalStreetName || cityName || postalZone);
+  const hasDetails = Boolean(
+    streetName
+      || buildingNumber
+      || citySubdivisionName
+      || additionalStreetName
+      || cityName
+      || postalZone,
+  );
 
   if (!hasDetails) {
     return null;
@@ -210,6 +259,8 @@ function normalizeAddress(input: BuildInvoiceXmlAddressInput | null | undefined)
 
   return {
     streetName,
+    buildingNumber,
+    citySubdivisionName,
     additionalStreetName,
     cityName,
     postalZone,
@@ -217,16 +268,33 @@ function normalizeAddress(input: BuildInvoiceXmlAddressInput | null | undefined)
   };
 }
 
-function normalizeParty(input: BuildInvoiceXmlPartyInput | null | undefined): UblParty | null {
+type NormalizePartyOptions = {
+  requireAddress?: boolean;
+  requireKsaCoreFields?: boolean;
+  forceCountryCode?: string | null;
+};
+
+function normalizeParty(
+  input: BuildInvoiceXmlPartyInput | null | undefined,
+  options: NormalizePartyOptions = {},
+): UblParty | null {
   if (!input) {
     return null;
+  }
+
+  const address = normalizeAddress(input.address, {
+    requireKsaCoreFields: options.requireKsaCoreFields,
+    forceCountryCode: options.forceCountryCode,
+  });
+  if (options.requireAddress && !address) {
+    throw new Error("Seller address details are required for invoice XML generation.");
   }
 
   return {
     registrationName: input.registrationName.trim() || "Unknown",
     taxNumber: input.taxNumber?.trim() || null,
     registrationNumber: input.registrationNumber?.trim() || null,
-    address: normalizeAddress(input.address),
+    address,
   };
 }
 
@@ -244,6 +312,27 @@ function vatCategoryCode(percent: number, taxRateName: string | null | undefined
   }
 
   return "Z" as const;
+}
+
+function defaultTaxExemptionForCategory(categoryCode: "Z" | "E" | "O") {
+  if (categoryCode === "E") {
+    return {
+      code: "VATEX-SA-29",
+      reason: "VAT exempt supply",
+    };
+  }
+
+  if (categoryCode === "O") {
+    return {
+      code: "VATEX-SA-OOS",
+      reason: "Services outside scope of tax",
+    };
+  }
+
+  return {
+    code: "VATEX-SA-35",
+    reason: "Medicines and medical equipment",
+  };
 }
 
 function invoiceTypeName(invoiceKind: ComplianceInvoiceKind, flags?: InvoiceTypeFlags) {
@@ -286,12 +375,19 @@ function buildTaxSubtotals(lines: UblInvoiceLine[]) {
       percent: number;
       taxableAmount: number;
       taxAmount: number;
+      taxExemptionReasonCode: string | null;
+      taxExemptionReason: string | null;
     }
   >();
 
   for (const line of lines) {
     const percent = asNumber(line.taxPercent);
-    const key = `${line.taxCategoryCode}|${percent.toFixed(2)}`;
+    const key = [
+      line.taxCategoryCode,
+      percent.toFixed(2),
+      line.taxExemptionReasonCode ?? "",
+      line.taxExemptionReason ?? "",
+    ].join("|");
     const existing = groups.get(key);
     if (existing) {
       existing.taxableAmount += asNumber(line.lineExtensionAmount);
@@ -304,6 +400,8 @@ function buildTaxSubtotals(lines: UblInvoiceLine[]) {
       percent,
       taxableAmount: asNumber(line.lineExtensionAmount),
       taxAmount: asNumber(line.taxAmount),
+      taxExemptionReasonCode: line.taxExemptionReasonCode,
+      taxExemptionReason: line.taxExemptionReason,
     });
   }
 
@@ -319,6 +417,8 @@ function buildTaxSubtotals(lines: UblInvoiceLine[]) {
       percent: group.percent.toFixed(2),
       taxableAmount: group.taxableAmount.toFixed(2),
       taxAmount: group.taxAmount.toFixed(2),
+      taxExemptionReasonCode: group.taxExemptionReasonCode,
+      taxExemptionReason: group.taxExemptionReason,
     }));
 }
 
@@ -327,18 +427,29 @@ function normalizeModel(input: BuildInvoiceXmlInput): UblInvoiceModel {
     throw new Error("Invoice XML generation requires at least one invoice line.");
   }
 
-  const seller = normalizeParty(input.seller);
+  const seller = normalizeParty(input.seller, {
+    requireAddress: true,
+    requireKsaCoreFields: true,
+    forceCountryCode: "SA",
+  });
   if (!seller) {
     throw new Error("Seller details are required for invoice XML generation.");
   }
 
   const buyer = normalizeParty(input.buyer);
   const issueDateParts = normalizeIssueDateParts(input.issueDateIso);
+  const documentType = input.documentType ?? "INVOICE";
   const typeCode = invoiceTypeCode({
-    documentType: input.documentType ?? "INVOICE",
+    documentType,
     invoiceKind: input.invoiceKind,
     typeFlags: input.typeFlags,
   });
+  const normalizedNote = input.note?.trim() || null;
+  const normalizedPaymentInstructionNote = input.paymentInstructionNote?.trim() || null;
+  const isCreditOrDebit =
+    documentType === "CREDIT_NOTE" || documentType === "DEBIT_NOTE";
+  const paymentInstructionNote =
+    normalizedPaymentInstructionNote ?? (isCreditOrDebit ? normalizedNote : null);
 
   const lines = input.lines.map((line, index) => {
     const lineTaxPercent = asNumber(line.taxRatePercent);
@@ -346,6 +457,20 @@ function normalizeModel(input: BuildInvoiceXmlInput): UblInvoiceModel {
     const lineExtensionAmount = money(line.lineExtensionAmount);
     const lineTotal = money(asNumber(line.lineExtensionAmount) + asNumber(line.taxAmount));
     const unitCode = line.unitCode?.trim() || "PCE";
+    const categoryCode = vatCategoryCode(lineTaxPercent, line.taxRateName ?? null);
+    let taxExemptionReasonCode = line.taxExemptionReasonCode?.trim() || null;
+    let taxExemptionReason = line.taxExemptionReason?.trim() || null;
+
+    if (categoryCode !== "S" && !taxExemptionReasonCode) {
+      const defaults = defaultTaxExemptionForCategory(categoryCode);
+      taxExemptionReasonCode = defaults.code;
+      taxExemptionReason = taxExemptionReason ?? defaults.reason;
+    }
+
+    if (categoryCode === "S") {
+      taxExemptionReasonCode = null;
+      taxExemptionReason = null;
+    }
 
     return {
       id: String(index + 1),
@@ -355,8 +480,10 @@ function normalizeModel(input: BuildInvoiceXmlInput): UblInvoiceModel {
       taxAmount: lineTaxAmount,
       roundingAmount: lineTotal,
       itemName: line.description.trim() || `Item ${index + 1}`,
-      taxCategoryCode: vatCategoryCode(lineTaxPercent, line.taxRateName ?? null),
+      taxCategoryCode: categoryCode,
       taxPercent: lineTaxPercent.toFixed(2),
+      taxExemptionReasonCode,
+      taxExemptionReason,
       priceAmount: money(line.unitPrice),
     };
   });
@@ -388,7 +515,8 @@ function normalizeModel(input: BuildInvoiceXmlInput): UblInvoiceModel {
     buyer,
     deliveryDate,
     paymentMeansCode: input.paymentMeansCode?.trim() || null,
-    paymentInstructionNote: input.paymentInstructionNote?.trim() || null,
+    paymentInstructionNote,
+    billingReferenceId: input.billingReferenceId?.trim() || null,
     taxTotal: taxTotalAmount,
     legalMonetaryTotal: {
       lineExtensionAmount,
@@ -400,7 +528,7 @@ function normalizeModel(input: BuildInvoiceXmlInput): UblInvoiceModel {
     },
     taxSubtotals,
     lines,
-    note: input.note?.trim() || null,
+    note: normalizedNote,
   };
 }
 
@@ -472,6 +600,12 @@ function partyNode(party: UblParty | null) {
           party.address.additionalStreetName
             ? node("cbc:AdditionalStreetName", [party.address.additionalStreetName])
             : null,
+          party.address.buildingNumber
+            ? node("cbc:BuildingNumber", [party.address.buildingNumber])
+            : null,
+          party.address.citySubdivisionName
+            ? node("cbc:CitySubdivisionName", [party.address.citySubdivisionName])
+            : null,
           party.address.cityName ? node("cbc:CityName", [party.address.cityName]) : null,
           party.address.postalZone ? node("cbc:PostalZone", [party.address.postalZone]) : null,
           node("cac:Country", [
@@ -494,6 +628,8 @@ function partyNode(party: UblParty | null) {
 function taxCategoryNode(input: {
   code: "S" | "Z" | "E" | "O";
   percent: string;
+  taxExemptionReasonCode?: string | null;
+  taxExemptionReason?: string | null;
   includeSchemeAttributes: boolean;
 }) {
   return node("cac:TaxCategory", [
@@ -508,6 +644,12 @@ function taxCategoryNode(input: {
         : undefined,
     ),
     node("cbc:Percent", [input.percent]),
+    input.taxExemptionReasonCode
+      ? node("cbc:TaxExemptionReasonCode", [input.taxExemptionReasonCode])
+      : null,
+    input.taxExemptionReason
+      ? node("cbc:TaxExemptionReason", [input.taxExemptionReason])
+      : null,
     node("cac:TaxScheme", [
       node(
         "cbc:ID",
@@ -532,6 +674,8 @@ function invoiceNode(model: UblInvoiceModel): XmlNode {
       taxCategoryNode({
         code: taxSubtotal.categoryCode,
         percent: taxSubtotal.percent,
+        taxExemptionReasonCode: taxSubtotal.taxExemptionReasonCode,
+        taxExemptionReason: taxSubtotal.taxExemptionReason,
         includeSchemeAttributes: true,
       }),
     ]),
@@ -553,6 +697,12 @@ function invoiceNode(model: UblInvoiceModel): XmlNode {
         node("cac:ClassifiedTaxCategory", [
           node("cbc:ID", [line.taxCategoryCode]),
           node("cbc:Percent", [line.taxPercent]),
+          line.taxExemptionReasonCode
+            ? node("cbc:TaxExemptionReasonCode", [line.taxExemptionReasonCode])
+            : null,
+          line.taxExemptionReason
+            ? node("cbc:TaxExemptionReason", [line.taxExemptionReason])
+            : null,
           node("cac:TaxScheme", [node("cbc:ID", ["VAT"])]),
         ]),
       ]),
@@ -585,6 +735,13 @@ function invoiceNode(model: UblInvoiceModel): XmlNode {
       model.note ? node("cbc:Note", [model.note], { languageID: "ar" }) : null,
       node("cbc:DocumentCurrencyCode", [currency]),
       node("cbc:TaxCurrencyCode", [currency]),
+      model.billingReferenceId
+        ? node("cac:BillingReference", [
+            node("cac:InvoiceDocumentReference", [
+              node("cbc:ID", [model.billingReferenceId]),
+            ]),
+          ])
+        : null,
       node("cac:AdditionalDocumentReference", [
         node("cbc:ID", ["ICV"]),
         node("cbc:UUID", [model.invoiceCounter]),

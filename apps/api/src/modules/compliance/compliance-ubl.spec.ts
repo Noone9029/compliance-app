@@ -21,6 +21,8 @@ function createInput(
       registrationNumber: "1010010000",
       address: {
         streetName: "Prince Sultan",
+        buildingNumber: "2322",
+        citySubdivisionName: "Al-Murabba",
         additionalStreetName: "Al-Murabba",
         cityName: "Riyadh",
         postalZone: "12211",
@@ -32,6 +34,8 @@ function createInput(
       taxNumber: "300765432100003",
       address: {
         streetName: "Salah Al-Din",
+        buildingNumber: "1111",
+        citySubdivisionName: "Al-Murooj",
         cityName: "Riyadh",
         postalZone: "12222",
         countryCode: "SA",
@@ -75,6 +79,9 @@ describe("compliance-ubl", () => {
       '<cbc:InvoiceTypeCode name="0100000">388</cbc:InvoiceTypeCode>',
     );
     expect(xml).toContain("<cac:AccountingSupplierParty>");
+    expect(xml).toContain("<cbc:BuildingNumber>2322</cbc:BuildingNumber>");
+    expect(xml).toContain("<cbc:CitySubdivisionName>Al-Murabba</cbc:CitySubdivisionName>");
+    expect(xml).toContain("<cbc:IdentificationCode>SA</cbc:IdentificationCode>");
     expect(xml).toContain("<cac:AccountingCustomerParty>");
     expect(xml).toContain("<cac:TaxTotal>");
     expect(xml).toContain("<cac:LegalMonetaryTotal>");
