@@ -36,6 +36,7 @@ pnpm --filter @daftar/api exec vitest run src/week12-compliance-onboarding-live.
 ## Notes
 
 - `ZATCA_BASE_URL` should be `https://gw-fatoora.zatca.gov.sa`.
+- Do not set global `ZATCA_CLIENT_ID` / `ZATCA_CLIENT_SECRET`; onboarding credentials are per device.
 - Endpoint routing is derived from onboarding environment:
   - `Production` -> `/e-invoicing/core`
   - `Sandbox` -> `/e-invoicing/simulation`

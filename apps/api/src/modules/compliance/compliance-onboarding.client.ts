@@ -4,6 +4,10 @@ import { Injectable } from "@nestjs/common";
 import * as x509 from "@peculiar/x509";
 
 import { loadEnv, type DaftarEnv } from "@daftar/config";
+import {
+  redactSensitiveText,
+  sanitizeSensitiveObject,
+} from "./secret-redaction";
 
 export type ComplianceCertificateMaterial = {
   requestId: string | null;
@@ -36,9 +40,9 @@ export class ComplianceOnboardingClientError extends Error {
     statusCode?: number | null;
     payload?: Record<string, unknown> | null;
   }) {
-    super(input.message);
+    super(redactSensitiveText(input.message));
     this.statusCode = input.statusCode ?? null;
-    this.payload = input.payload ?? null;
+    this.payload = sanitizeSensitiveObject(input.payload ?? null);
   }
 }
 

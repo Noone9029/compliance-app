@@ -1,9 +1,9 @@
-# Daftar Preview Deployment
+# Daftar Deployment Preview
 
-This repo now supports two preview paths:
+Use this file for the quick-start preview path.  
+For full service-by-service hosted configuration, see:
 
-1. local containerized preview
-2. split hosted preview with the web on Vercel and the API/worker on Render or Railway
+- `docs/deployment-configuration.md`
 
 ## 1. Local containerized preview
 
@@ -34,105 +34,21 @@ Stop the preview stack:
 pnpm preview:down
 ```
 
-Notes:
+## 2. Hosted preview (split services)
 
-- The preview compose file overrides `DATABASE_URL`, `REDIS_URL`, and `INTERNAL_API_URL` so the containers can talk to each other.
-- Browser requests still use `NEXT_PUBLIC_API_URL=http://localhost:4000`.
+Deploy services in this order:
 
-## 2. Split hosted preview
+1. Database + Redis
+2. API (with migrations)
+3. Worker
+4. Web
 
-### Web service
+Required per-service variables are documented in:
 
-Deploy `apps/web`.
+- `docs/deployment-configuration.md`
 
-- Runtime: Node 20
-- Install command: `pnpm install --frozen-lockfile`
-- Build command: `pnpm --filter @daftar/web build`
-- Start command: `pnpm --filter @daftar/web start`
+## Notes
 
-Required environment variables:
-
-- `NODE_ENV=production`
-- `APP_BASE_URL=https://<your-web-host>`
-- `NEXT_PUBLIC_API_URL=https://<your-api-host>`
-- `INTERNAL_API_URL=https://<your-api-host>`
-- `NEXT_PUBLIC_APP_NAME=Daftar`
-
-On Vercel, set the project root directory to `apps/web`.
-
-### API service
-
-Deploy with the Dockerfile at `apps/api/Dockerfile`.
-
-Required environment variables:
-
-- `NODE_ENV=production`
-- `PORT=4000`
-- `APP_BASE_URL=https://<your-web-host>`
-- `NEXT_PUBLIC_API_URL=https://<your-api-host>`
-- `INTERNAL_API_URL=https://<your-api-host>`
-- `DATABASE_URL=<managed-postgres-url>`
-- `REDIS_URL=<managed-redis-url>`
-- `SESSION_COOKIE_NAME=daftar_session`
-- `SESSION_COOKIE_SAME_SITE=none`
-- `SESSION_COOKIE_SECURE=true`
-- `SESSION_TTL_HOURS=12`
-- `AUTH_BCRYPT_ROUNDS=10`
-- `STRIPE_SECRET_KEY=<preview-value>`
-- `STRIPE_WEBHOOK_SECRET=<preview-value>`
-- `XERO_CLIENT_ID=<preview-value>`
-- `XERO_CLIENT_SECRET=<preview-value>`
-- `QBO_CLIENT_ID=<preview-value>`
-- `QBO_CLIENT_SECRET=<preview-value>`
-- `ZOHO_CLIENT_ID=<preview-value>`
-- `ZOHO_CLIENT_SECRET=<preview-value>`
-- `ZATCA_BASE_URL=<preview-value>`
-- `ZATCA_CLIENT_ID=<preview-value>`
-- `ZATCA_CLIENT_SECRET=<preview-value>`
-
-Deploy-time commands:
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm --filter @daftar/api build
-pnpm exec prisma migrate deploy --schema apps/api/prisma/schema.prisma
-pnpm --filter @daftar/api start
-```
-
-### Worker service
-
-Deploy with the Dockerfile at `apps/worker/Dockerfile`.
-
-Required environment variables:
-
-- `NODE_ENV=production`
-- `DATABASE_URL=<managed-postgres-url>`
-- `REDIS_URL=<managed-redis-url>`
-
-Deploy-time commands:
-
-```powershell
-pnpm install --frozen-lockfile
-pnpm --filter @daftar/worker build
-pnpm --filter @daftar/worker start
-```
-
-## Seeded users
-
-After seeding, use one of these accounts:
-
-- `owner@daftar.local` / `Password123!`
-- `admin@daftar.local` / `Password123!`
-- `viewer@daftar.local` / `Password123!`
-
-## What this preview validates
-
-- auth and tenant switching
-- settings and contacts
-- invoices, bills, quotes, and compliance screens
-- connectors, subscription pages, fixed assets, reports, and charts
-
-## Current preview limits
-
-- Stripe and connector flows are validated inside the app, but they are still preview implementations, not live provider traffic.
-- API and worker services intentionally run through `tsx` at start time because the workspace packages are still TS-first. This keeps the preview packaging small and low-risk without refactoring the runtime model.
+- ZATCA no longer uses global `ZATCA_CLIENT_ID` / `ZATCA_CLIENT_SECRET` env variables.
+- Device credentials are provisioned and rotated through onboarding, then stored per device.
+- The API and worker now enforce production startup checks for required env vars.

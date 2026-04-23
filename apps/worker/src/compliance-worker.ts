@@ -2,7 +2,7 @@ import { Worker } from "bullmq";
 import IORedis from "ioredis";
 import { PrismaClient } from "@prisma/client";
 
-import { loadEnv, queueNames } from "@daftar/config";
+import { loadServiceEnv, queueNames } from "@daftar/config";
 import {
   enqueueComplianceDeadLetter,
   enqueueComplianceSubmission,
@@ -13,7 +13,8 @@ import {
 } from "../../api/src/modules/compliance/compliance-transport";
 
 export async function createComplianceWorkerRuntime() {
-  const env = loadEnv();
+  // Queue incident handling procedures: docs/runbooks/handle-dead-letter-items.md
+  const env = loadServiceEnv("worker");
   const connection = new IORedis(env.REDIS_URL, {
     maxRetriesPerRequest: null,
   });

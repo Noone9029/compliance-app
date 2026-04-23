@@ -10,9 +10,13 @@ import * as x509 from "@peculiar/x509";
 
 import { loadEnv } from "@daftar/config";
 import { permissionKeys, roleKeys } from "@daftar/types";
+import { ComplianceEncryptionService } from "../src/modules/compliance/encryption.service";
+import { sanitizeSensitiveValue } from "../src/modules/compliance/secret-redaction";
+import { protectSeedComplianceSecrets } from "../src/modules/compliance/seed-secret-hygiene";
 
 const env = loadEnv();
 const storageRoot = path.resolve(process.cwd(), ".local-storage", "files");
+const complianceEncryptionService = new ComplianceEncryptionService(env);
 const prisma = new PrismaClient({
   datasources: {
     db: {
@@ -1510,6 +1514,16 @@ export async function seedDatabase(client: PrismaClient) {
     const complianceMaterial = await generateSeedComplianceMaterial(
       `${organization.slug}-seed-device`,
     );
+    const seedCertificateSecret = createHash("sha256")
+      .update(`${organization.slug}:seed-certificate-secret`)
+      .digest("base64");
+    const protectedSeedSecrets = protectSeedComplianceSecrets(
+      {
+        privateKeyPem: complianceMaterial.privateKeyPem,
+        certificateSecret: seedCertificateSecret,
+      },
+      complianceEncryptionService,
+    );
 
     const complianceOnboarding = await client.complianceOnboarding.create({
       data: {
@@ -1528,7 +1542,7 @@ export async function seedDatabase(client: PrismaClient) {
         industry: isPrimary ? "Events" : "Software",
         csrPem: complianceMaterial.csrPem,
         csrBase64: complianceMaterial.csrBase64,
-        privateKeyPem: complianceMaterial.privateKeyPem,
+        privateKeyPem: protectedSeedSecrets.privateKeyPem,
         publicKeyPem: complianceMaterial.publicKeyPem,
         csrGeneratedAt: new Date("2026-03-31T09:00:00.000Z"),
         csrSubmittedAt: new Date("2026-04-01T08:45:00.000Z"),
@@ -1538,8 +1552,11 @@ export async function seedDatabase(client: PrismaClient) {
         certificateId: `cert-${organization.slug}`,
         certificatePem: complianceMaterial.certificatePem,
         certificateBase64: complianceMaterial.certificateBase64,
-        certificateSecret: `seed-secret-${organization.slug}`,
-        secretFingerprint: `${organization.slug}-secret`,
+        certificateSecret: protectedSeedSecrets.certificateSecret,
+        secretFingerprint: createHash("sha256")
+          .update(seedCertificateSecret)
+          .digest("hex")
+          .slice(0, 12),
         certificateIssuedAt: new Date("2026-04-01T09:00:00.000Z"),
         certificateExpiresAt: new Date("2027-04-01T09:00:00.000Z"),
         lastActivatedAt: new Date("2026-04-01T09:00:00.000Z"),
@@ -2402,7 +2419,7 @@ const entryUrl = process.argv[1] ? pathToFileURL(process.argv[1]).href : null;
 if (entryUrl === import.meta.url) {
   main()
     .catch(async (error) => {
-      console.error(error);
+      console.error(sanitizeSensitiveValue(error));
       await prisma.$disconnect();
       process.exit(1);
     })

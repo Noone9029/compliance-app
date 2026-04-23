@@ -5,6 +5,7 @@ export default defineConfig({
     environment: "node",
     globals: true,
     include: ["src/**/*.spec.ts"],
+    snapshotSerializers: ["./src/test/secret-redaction.snapshot-serializer.ts"],
     pool: "forks",
     fileParallelism: false,
     maxWorkers: 1,

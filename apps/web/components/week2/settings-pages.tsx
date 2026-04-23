@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, StatusBadge } from "@daftar/ui";
 import { notFound } from "next/navigation";
 
 import { fetchServerJson } from "../api";
+import { ConnectorLiveControls } from "./connector-live-controls";
 import { ResourceManager } from "./resource-manager";
 import { SectionNav } from "./section-nav";
 import { SettingsHub } from "./settings-hub";
@@ -38,6 +39,8 @@ export async function renderSettingsPage(orgSlug: string, segments: string[]) {
     capabilities,
     "platform.membership.read"
   );
+  const canWriteConnectors = hasPermission(capabilities, "connectors.write");
+  const canSyncConnectors = hasPermission(capabilities, "connectors.sync");
   const canManageTeamAccess = hasPermission(
     capabilities,
     "platform.membership.manage"
@@ -481,8 +484,7 @@ export async function renderSettingsPage(orgSlug: string, segments: string[]) {
             <div className="space-y-1">
               <h2 className="text-xl font-semibold">Connector Readiness</h2>
               <p className="text-sm text-slate-500">
-                Stored connector state, export readiness, and sync history are available here.
-                Live provider authentication and sync controls are not enabled in this workspace.
+                Stored connector state, export readiness, sync history, and live provider connection controls are available here.
               </p>
             </div>
           </CardHeader>
@@ -513,6 +515,13 @@ export async function renderSettingsPage(orgSlug: string, segments: string[]) {
             </div>
           </CardContent>
         </Card>
+
+        <ConnectorLiveControls
+          accounts={accounts}
+          canSyncConnectors={canSyncConnectors}
+          canWriteConnectors={canWriteConnectors}
+          orgSlug={orgSlug}
+        />
 
         <div className="grid gap-6 xl:grid-cols-2">
           {accounts.length === 0 ? (

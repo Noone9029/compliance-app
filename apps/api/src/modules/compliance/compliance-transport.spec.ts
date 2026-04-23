@@ -475,4 +475,27 @@ describe("compliance transport", () => {
       }),
     ).rejects.toBeInstanceOf(ComplianceTransportError);
   });
+
+  it("redacts secrets inside transport errors and payloads", () => {
+    const error = new ComplianceTransportError({
+      message: "certificateSecret=super-secret Authorization: Basic dXNlcjpzZWNyZXQ=",
+      category: "UNKNOWN",
+      retryable: false,
+      responsePayload: {
+        certificateSecret: "super-secret",
+        nested: {
+          privateKeyPem: "-----BEGIN PRIVATE KEY-----abc-----END PRIVATE KEY-----",
+        },
+      },
+    });
+
+    expect(error.message).toContain("[REDACTED]");
+    expect(error.message).not.toContain("super-secret");
+    expect(error.responsePayload).toEqual({
+      certificateSecret: "[REDACTED]",
+      nested: {
+        privateKeyPem: "[REDACTED]",
+      },
+    });
+  });
 });

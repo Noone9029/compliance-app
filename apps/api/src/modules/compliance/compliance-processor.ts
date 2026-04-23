@@ -16,6 +16,10 @@ import {
   enqueueComplianceSubmission,
 } from "./compliance-queue";
 import { ComplianceEncryptionService } from "./encryption.service";
+import {
+  redactSensitiveText,
+  sanitizeSensitiveObject,
+} from "./secret-redaction";
 
 type PrismaClientLike = PrismaClient | Prisma.TransactionClient;
 
@@ -272,6 +276,12 @@ export async function processComplianceSubmission(input: {
     });
 
     const warned = result.status === "ACCEPTED_WITH_WARNINGS";
+    const safeWarnings = result.warnings.map((warning) =>
+      redactSensitiveText(warning),
+    );
+    const safeErrors = result.errors.map((entry) => redactSensitiveText(entry));
+    const safeResponsePayload = sanitizeSensitiveObject(result.responsePayload) ?? {};
+    const safeResponseMessage = redactSensitiveText(result.responseMessage);
     const nextDocumentStatus = acceptedDocumentStatus(submission.flow, warned);
     const completedAt = new Date();
 
@@ -282,10 +292,10 @@ export async function processComplianceSubmission(input: {
         retryable: false,
         externalSubmissionId: result.externalSubmissionId,
         responsePayload: {
-          ...result.responsePayload,
+          ...safeResponsePayload,
           requestId: result.requestId,
-          warnings: result.warnings,
-          errors: result.errors,
+          warnings: safeWarnings,
+          errors: safeErrors,
         } as Prisma.InputJsonValue,
         finishedAt: completedAt,
       },
@@ -305,10 +315,10 @@ export async function processComplianceSubmission(input: {
         failureCategory: null,
         externalSubmissionId: result.externalSubmissionId,
         responsePayload: {
-          ...result.responsePayload,
+          ...safeResponsePayload,
           requestId: result.requestId,
-          warnings: result.warnings,
-          errors: result.errors,
+          warnings: safeWarnings,
+          errors: safeErrors,
           stampedXmlAvailable: Boolean(result.stampedXmlContent),
         } as Prisma.InputJsonValue,
       },
@@ -346,7 +356,7 @@ export async function processComplianceSubmission(input: {
         failureCategory: null,
         externalSubmissionId: result.externalSubmissionId,
         responseCode: result.responseCode,
-        responseMessage: result.responseMessage,
+        responseMessage: safeResponseMessage,
         submittedAt: completedAt,
       },
       create: {
@@ -358,7 +368,7 @@ export async function processComplianceSubmission(input: {
         submissionFlow: submission.flow,
         lastSubmissionStatus: result.status,
         responseCode: result.responseCode,
-        responseMessage: result.responseMessage,
+        responseMessage: safeResponseMessage,
         externalSubmissionId: result.externalSubmissionId,
         submittedAt: completedAt,
       },
@@ -372,13 +382,13 @@ export async function processComplianceSubmission(input: {
       zatcaSubmissionId: submission.id,
       action: acceptedEventAction(warned),
       status: nextDocumentStatus,
-      message: result.responseMessage,
+      message: safeResponseMessage,
       metadata: {
         flow: submission.flow,
-        ...result.responsePayload,
+        ...safeResponsePayload,
         requestId: result.requestId,
-        warnings: result.warnings,
-        errors: result.errors,
+        warnings: safeWarnings,
+        errors: safeErrors,
       } as Prisma.InputJsonValue,
     });
 
@@ -391,13 +401,13 @@ export async function processComplianceSubmission(input: {
             : "sales.invoice.reported_to_zatca",
         fromStatus: salesInvoice.status,
         toStatus: salesInvoice.status,
-        message: result.responseMessage,
+        message: safeResponseMessage,
         metadata: {
           complianceDocumentId: complianceDocument.id,
           submissionId: submission.id,
           externalSubmissionId: result.externalSubmissionId,
           requestId: result.requestId,
-          warnings: result.warnings,
+          warnings: safeWarnings,
         } as Prisma.InputJsonValue,
       },
     });
@@ -436,14 +446,27 @@ export async function processComplianceSubmission(input: {
     const completedAt = new Date();
     const shouldDeadLetter =
       !retryable && nextDocumentStatus === "FAILED" && transportError.retryable;
+    const deadLetterMetadata = shouldDeadLetter
+      ? {
+          state: "OPEN",
+          reason: transportError.message,
+          failureCategory: transportError.category,
+          attemptNumber,
+          failedAt: completedAt.toISOString(),
+          wasRetryable: transportError.retryable,
+        }
+      : null;
     const failureResponsePayload = shouldDeadLetter
       ? ({
           ...(transportError.responsePayload ?? {}),
           deadLettered: true,
           deadLetteredAt: completedAt.toISOString(),
           deadLetterReason: transportError.message,
+          deadLetter: deadLetterMetadata,
         } as Record<string, unknown>)
       : transportError.responsePayload;
+    const safeFailureResponsePayload =
+      sanitizeSensitiveObject(failureResponsePayload) ?? null;
 
     await input.prisma.zatcaSubmissionAttempt.update({
       where: { id: attempt.id },
@@ -453,7 +476,7 @@ export async function processComplianceSubmission(input: {
         httpStatus: transportError.statusCode,
         failureCategory: transportError.category,
         externalSubmissionId: transportError.externalSubmissionId,
-        responsePayload: failureResponsePayload as Prisma.InputJsonValue,
+        responsePayload: safeFailureResponsePayload as Prisma.InputJsonValue,
         errorMessage: transportError.message,
         finishedAt: completedAt,
       },
@@ -472,7 +495,7 @@ export async function processComplianceSubmission(input: {
         errorMessage: transportError.message,
         failureCategory: transportError.category,
         externalSubmissionId: transportError.externalSubmissionId,
-        responsePayload: failureResponsePayload as Prisma.InputJsonValue,
+        responsePayload: safeFailureResponsePayload as Prisma.InputJsonValue,
       },
     });
 
@@ -594,6 +617,9 @@ export async function processComplianceSubmission(input: {
         metadata: {
           category: transportError.category,
           attemptNumber,
+          reason: transportError.message,
+          failedAt: completedAt.toISOString(),
+          wasRetryable: transportError.retryable,
         } as Prisma.InputJsonValue,
       });
     }

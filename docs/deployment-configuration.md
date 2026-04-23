@@ -1,0 +1,141 @@
+# Daftar Hosted Deployment Configuration
+
+This document is the deployment reference for the current codebase.
+
+Operational support procedures are documented in:
+
+- `docs/runbooks/README.md`
+
+## Service Responsibilities
+
+- `apps/api`
+  - HTTP API, auth/session, business modules
+  - compliance orchestration and queue scheduling
+  - connector OAuth endpoints
+- `apps/worker`
+  - compliance queue consumer
+  - submission retries, dead-letter handling, event progression
+- `apps/web`
+  - admin/operator/client UI
+  - browser traffic and server-side rendering
+- Infrastructure
+  - PostgreSQL: primary persistence
+  - Redis: queue transport/backoff/dead-letter
+  - S3-compatible storage: attachments/artifacts
+
+## Production Startup Checks
+
+- API startup (`apps/api/src/main.ts`) enforces required production env via `loadServiceEnv("api")`.
+- Worker startup (`apps/worker/src/compliance-worker.ts`) enforces required production env via `loadServiceEnv("worker")`.
+- Web build/start scripts (`apps/web/scripts/build.mjs`, `apps/web/scripts/start.mjs`) enforce required web env in production mode.
+
+If required production values are missing, services fail fast with explicit messages.
+
+## Required Environment Variables by Service
+
+### API (`apps/api`)
+
+Required in production:
+
+- `NODE_ENV=production`
+- `APP_BASE_URL`
+- `NEXT_PUBLIC_API_URL`
+- `INTERNAL_API_URL`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `SESSION_COOKIE_NAME`
+- `SESSION_COOKIE_SAME_SITE`
+- `SESSION_COOKIE_SECURE`
+- `SESSION_TTL_HOURS`
+- `AUTH_BCRYPT_ROUNDS`
+- `COMPLIANCE_ENCRYPTION_KEY`
+- `CONNECTOR_SECRETS_KEY`
+
+Recommended:
+
+- `LOG_LEVEL=info`
+- `ZATCA_BASE_URL=https://gw-fatoora.zatca.gov.sa`
+- `ZATCA_SDK_CLI_PATH=fatoora`
+- `ZATCA_LOCAL_VALIDATION_MODE=required` (or `best-effort`)
+
+Optional feature vars:
+
+- Stripe: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+- Connectors: `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`
+- Storage overrides: `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`
+
+### Worker (`apps/worker`)
+
+Required in production:
+
+- `NODE_ENV=production`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `COMPLIANCE_ENCRYPTION_KEY`
+
+Recommended:
+
+- `LOG_LEVEL=info`
+- same compliance/environment settings used by API for consistency
+
+### Web (`apps/web`)
+
+Required in production:
+
+- `NODE_ENV=production`
+- `APP_BASE_URL`
+- `NEXT_PUBLIC_API_URL`
+- `INTERNAL_API_URL`
+
+Optional:
+
+- `NEXT_PUBLIC_APP_NAME`
+- `WEB_PORT` or `PORT`
+
+## Deprecated / Legacy Guidance
+
+Do not use:
+
+- `ZATCA_CLIENT_ID`
+- `ZATCA_CLIENT_SECRET`
+
+Current model:
+
+- ZATCA credentials are provisioned through onboarding per device/environment.
+- Active credentials are selected from onboarding records during submission.
+- Secrets are encrypted at rest and not exposed in read models.
+
+## Safe Defaults and Assumptions
+
+Local defaults in `packages/config/src/index.ts` are for development convenience only.
+
+- Production should set explicit env values through the deployment platform.
+- Avoid relying on fallback defaults for infrastructure/security-sensitive keys.
+- `COMPLIANCE_ENCRYPTION_PREVIOUS_KEYS` can be set during rotation windows.
+
+## Startup and Migration Order
+
+1. Bring up PostgreSQL and Redis.
+2. Run Prisma migrations:
+   - `pnpm db:deploy`
+3. (Optional, non-production) run seed:
+   - `pnpm db:seed`
+4. Start API.
+5. Start Worker.
+6. Start Web.
+
+## Queue, Database, and Storage Dependencies
+
+- Worker requires Redis queue connectivity before processing jobs.
+- API readiness currently checks database connectivity (`/ready`).
+- Compliance/background flow expects both Postgres and Redis healthy.
+- File and artifact operations expect configured S3-compatible storage.
+
+## Live ZATCA Lane (Optional)
+
+Non-mocked live lane is opt-in:
+
+- `docs/compliance-live-lane.md`
+- enabled with `LIVE_ZATCA_E2E=1` plus required live-lane vars
+
+This lane is separate from normal production startup requirements.

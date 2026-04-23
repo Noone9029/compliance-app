@@ -4,11 +4,10 @@ import { NestFactory } from "@nestjs/core";
 import cookieParser from "cookie-parser";
 import type { INestApplication } from "@nestjs/common";
 
-import { loadEnv } from "@daftar/config";
+import { loadEnv, type DaftarEnv } from "@daftar/config";
 import { AppModule } from "./app.module";
 
-export async function createApp(): Promise<INestApplication> {
-  const env = loadEnv();
+export async function createApp(env: DaftarEnv = loadEnv()): Promise<INestApplication> {
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true
   });

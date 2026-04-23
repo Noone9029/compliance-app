@@ -1,11 +1,11 @@
 import "reflect-metadata";
 
-import { loadEnv } from "@daftar/config";
+import { loadServiceEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 
 async function bootstrap() {
-  const env = loadEnv();
-  const app = await createApp();
+  const env = loadServiceEnv("api");
+  const app = await createApp(env);
   await app.listen(env.API_PORT);
 }
 

@@ -5,6 +5,7 @@ import {
   SdkParityService,
   type RuntimeSdkValidationResult,
 } from "./sdk-parity.service";
+import { redactSensitiveText } from "./secret-redaction";
 
 export type LocalValidationSeverity = "warning" | "error";
 
@@ -80,6 +81,7 @@ export class ComplianceLocalValidationService {
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Local SDK validation failed.";
+      const safeMessage = redactSensitiveText(message);
       const lowered = message.toLowerCase();
       const isMissingSdkRuntime =
         lowered.includes("enoent") ||
@@ -100,7 +102,7 @@ export class ComplianceLocalValidationService {
             command,
             status: "SKIPPED",
             stdout: "",
-            stderr: message,
+            stderr: safeMessage,
             exitCode: null,
             issues: [warning],
           })),
@@ -122,7 +124,7 @@ export class ComplianceLocalValidationService {
           command,
           status: "FAILED",
           stdout: "",
-          stderr: message,
+          stderr: safeMessage,
           exitCode: null,
           issues: [failure],
         })),
@@ -138,31 +140,31 @@ export class ComplianceLocalValidationService {
     const commands = runtimeValidation.commands.map<LocalValidationCommandResult>((command) => {
       const warningIssues = command.warnings.map<LocalValidationIssue>((message) => ({
         code: "SDK_WARNING",
-        message,
+        message: redactSensitiveText(message),
         severity: "warning",
       }));
       const errorIssues = command.errors.map<LocalValidationIssue>((message) => ({
         code: "SDK_ERROR",
-        message,
+        message: redactSensitiveText(message),
         severity: "error",
       }));
       return {
         command: command.command,
         status: command.status,
-        stdout: command.stdout,
-        stderr: command.stderr,
+        stdout: redactSensitiveText(command.stdout),
+        stderr: redactSensitiveText(command.stderr),
         exitCode: command.exitCode,
         issues: [...warningIssues, ...errorIssues],
       };
     });
     const warnings = runtimeValidation.warnings.map<LocalValidationIssue>((message) => ({
       code: "SDK_WARNING",
-      message,
+      message: redactSensitiveText(message),
       severity: "warning",
     }));
     const errors = runtimeValidation.errors.map<LocalValidationIssue>((message) => ({
       code: "SDK_ERROR",
-      message,
+      message: redactSensitiveText(message),
       severity: "error",
     }));
 

@@ -7,6 +7,10 @@ import type {
 } from "@daftar/types";
 
 import { loadEnv, type DaftarEnv } from "@daftar/config";
+import {
+  redactSensitiveText,
+  sanitizeSensitiveObject,
+} from "./secret-redaction";
 
 export type ComplianceTransportCredentials = {
   clientId: string;
@@ -58,10 +62,10 @@ export class ComplianceTransportError extends Error {
     statusCode?: number | null;
     externalSubmissionId?: string | null;
   }) {
-    super(input.message);
+    super(redactSensitiveText(input.message));
     this.category = input.category;
     this.retryable = input.retryable;
-    this.responsePayload = input.responsePayload ?? null;
+    this.responsePayload = sanitizeSensitiveObject(input.responsePayload ?? null);
     this.statusCode = input.statusCode ?? null;
     this.externalSubmissionId = input.externalSubmissionId ?? null;
   }
@@ -284,20 +288,21 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
     return {
       status: warned ? "ACCEPTED_WITH_WARNINGS" : "ACCEPTED",
       responseCode: statusCodeText,
-      responseMessage:
+      responseMessage: redactSensitiveText(
         this.pickString(payload, ["message", "dispositionMessage"]) ??
-        (request.flow === "CLEARANCE"
-          ? warned
-            ? "Invoice cleared with warnings by ZATCA."
-            : "Invoice cleared by ZATCA."
-          : warned
-            ? "Invoice reported with warnings to ZATCA."
-            : "Invoice reported to ZATCA."),
+          (request.flow === "CLEARANCE"
+            ? warned
+              ? "Invoice cleared with warnings by ZATCA."
+              : "Invoice cleared by ZATCA."
+            : warned
+              ? "Invoice reported with warnings to ZATCA."
+              : "Invoice reported to ZATCA."),
+      ),
       requestId: this.extractRequestId(payload),
       warnings,
       errors,
       stampedXmlContent: this.extractStampedXml(payload),
-      responsePayload: payload,
+      responsePayload: sanitizeSensitiveObject(payload) ?? {},
       externalSubmissionId: this.extractRequestId(payload),
     };
   }
@@ -379,7 +384,7 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
     for (const key of keys) {
       const value = payload[key];
       if (typeof value === "string" && value.trim().length > 0) {
-        return value.trim();
+        return redactSensitiveText(value.trim());
       }
     }
 
@@ -398,11 +403,13 @@ class LiveComplianceTransportClient implements ComplianceTransportClient {
     return value
       .map((entry) => {
         if (typeof entry === "string") {
-          return entry.trim();
+          return redactSensitiveText(entry.trim());
         }
         if (entry && typeof entry === "object") {
           const message = (entry as { message?: unknown }).message;
-          return typeof message === "string" ? message.trim() : "";
+          return typeof message === "string"
+            ? redactSensitiveText(message.trim())
+            : "";
         }
         return "";
       })

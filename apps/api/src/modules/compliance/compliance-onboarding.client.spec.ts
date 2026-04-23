@@ -96,6 +96,45 @@ describe("compliance onboarding client", () => {
     ).rejects.toBeInstanceOf(ComplianceOnboardingClientError);
   });
 
+  it("redacts secrets from onboarding client errors and payloads", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ZATCA_BASE_URL", "https://zatca.example");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          message: "certificateSecret=super-secret",
+          certificateSecret: "super-secret",
+          nested: {
+            privateKeyPem:
+              "-----BEGIN PRIVATE KEY-----abc-----END PRIVATE KEY-----",
+          },
+        }),
+      }),
+    );
+
+    const client = new ComplianceOnboardingClient();
+
+    await expect(
+      client.submitComplianceCsid({
+        csr: "csr",
+        otpCode: "123456",
+        environment: "Sandbox",
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining("[REDACTED]"),
+      payload: {
+        message: expect.stringContaining("[REDACTED]"),
+        certificateSecret: "[REDACTED]",
+        nested: {
+          privateKeyPem: "[REDACTED]",
+        },
+      },
+    });
+  });
+
   it("routes onboarding calls to simulation endpoint for sandbox devices", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("ZATCA_BASE_URL", "https://gw-fatoora.zatca.gov.sa");

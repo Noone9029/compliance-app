@@ -801,6 +801,45 @@ export type ComplianceTimelineRecord = {
   createdAt: string;
 };
 
+export const complianceDeadLetterStates = [
+  "OPEN",
+  "ACKNOWLEDGED",
+  "ESCALATED",
+  "REQUEUED",
+] as const;
+
+export type ComplianceDeadLetterState =
+  (typeof complianceDeadLetterStates)[number];
+
+export type ComplianceDeadLetterRecord = {
+  submissionId: string;
+  complianceDocumentId: string;
+  salesInvoiceId: string;
+  invoiceNumber: string;
+  submissionFlow: ComplianceSubmissionFlow;
+  submissionStatus: SubmissionStatus;
+  state: ComplianceDeadLetterState;
+  failureCategory: ComplianceFailureCategory | null;
+  lastError: string | null;
+  reason: string;
+  failedAt: string;
+  attemptCount: number;
+  maxAttempts: number;
+  wasRetryable: boolean;
+  canRequeue: boolean;
+  acknowledgedAt: string | null;
+  escalatedAt: string | null;
+  requeuedAt: string | null;
+  requestId: string | null;
+  externalSubmissionId: string | null;
+  updatedAt: string;
+};
+
+export type ComplianceDeadLetterDetailRecord = ComplianceDeadLetterRecord & {
+  compliance: ComplianceDocumentRecord;
+  timeline: ComplianceTimelineRecord[];
+};
+
 export type SalesInvoiceSummary = {
   id: string;
   organizationId: string;

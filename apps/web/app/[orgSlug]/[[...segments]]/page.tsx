@@ -104,7 +104,12 @@ export default async function TenantCatchAllPage({
   }
 
   if (segments[0] === "e-invoice-integration") {
-    return renderCompliancePage(orgSlug);
+    return renderCompliancePage(orgSlug, {
+      deadLetterSubmissionId:
+        segments[1] === "dead-letter" && typeof segments[2] === "string"
+          ? segments[2]
+          : undefined,
+    });
   }
 
   if (segments[0] === "reports") {

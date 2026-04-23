@@ -49,9 +49,41 @@ export const baseEnvSchema = z.object({
 });
 
 export type DaftarEnv = z.infer<typeof baseEnvSchema>;
+export type DaftarService = "api" | "web" | "worker";
+type EnvSourceInput = NodeJS.ProcessEnv;
+type LoadEnvOptions = {
+  includeWorkspaceEnvFiles?: boolean;
+};
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const workspaceRoot = resolve(configDir, "../../..");
+
+const requiredProductionEnvByService: Record<DaftarService, readonly string[]> = {
+  api: [
+    "APP_BASE_URL",
+    "NEXT_PUBLIC_API_URL",
+    "INTERNAL_API_URL",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "SESSION_COOKIE_NAME",
+    "SESSION_COOKIE_SAME_SITE",
+    "SESSION_COOKIE_SECURE",
+    "SESSION_TTL_HOURS",
+    "AUTH_BCRYPT_ROUNDS",
+    "COMPLIANCE_ENCRYPTION_KEY",
+    "CONNECTOR_SECRETS_KEY",
+  ],
+  web: [
+    "APP_BASE_URL",
+    "NEXT_PUBLIC_API_URL",
+    "INTERNAL_API_URL",
+  ],
+  worker: [
+    "DATABASE_URL",
+    "REDIS_URL",
+    "COMPLIANCE_ENCRYPTION_KEY",
+  ],
+} as const;
 
 function parseEnvFile(filePath: string): Record<string, string> {
   if (!existsSync(filePath)) {
@@ -85,11 +117,15 @@ function loadWorkspaceEnvFiles(): Record<string, string> {
   };
 }
 
-export function loadEnv(input: NodeJS.ProcessEnv = {}): DaftarEnv {
-  const workspaceEnv = loadWorkspaceEnvFiles();
+function mergeEnvSources(
+  input: EnvSourceInput = {},
+  options: LoadEnvOptions = {},
+) {
+  const includeWorkspaceEnvFiles = options.includeWorkspaceEnvFiles ?? true;
+  const workspaceEnv = includeWorkspaceEnvFiles ? loadWorkspaceEnvFiles() : {};
   const merged = {
-    ...process.env,
     ...workspaceEnv,
+    ...process.env,
     ...input
   };
 
@@ -107,7 +143,52 @@ export function loadEnv(input: NodeJS.ProcessEnv = {}): DaftarEnv {
     merged.INTERNAL_API_URL = merged.NEXT_PUBLIC_API_URL;
   }
 
+  return merged;
+}
+
+function missingOrBlank(value: unknown) {
+  return typeof value !== "string" || value.trim().length === 0;
+}
+
+function assertProductionServiceEnv(
+  service: DaftarService,
+  mergedRawEnv: Record<string, string | undefined>,
+) {
+  const requiredKeys = requiredProductionEnvByService[service];
+  const missing = requiredKeys.filter((key) => missingOrBlank(mergedRawEnv[key]));
+  if (missing.length === 0) {
+    return;
+  }
+
+  const message = [
+    `Missing required production environment variables for ${service}: ${missing.join(", ")}.`,
+    "Set these variables explicitly in your deployment environment before starting the service.",
+    "Daftar no longer relies on implicit schema defaults for production startup checks.",
+  ].join(" ");
+  throw new Error(message);
+}
+
+export function loadEnv(
+  input: EnvSourceInput = {},
+  options: LoadEnvOptions = {},
+): DaftarEnv {
+  const merged = mergeEnvSources(input, options);
   return baseEnvSchema.parse(merged);
+}
+
+export function loadServiceEnv(
+  service: DaftarService,
+  input: EnvSourceInput = {},
+  options: LoadEnvOptions = {},
+): DaftarEnv {
+  const merged = mergeEnvSources(input, options);
+  const parsed = baseEnvSchema.parse(merged);
+
+  if (parsed.NODE_ENV === "production") {
+    assertProductionServiceEnv(service, merged);
+  }
+
+  return parsed;
 }
 
 export const queueNames = {

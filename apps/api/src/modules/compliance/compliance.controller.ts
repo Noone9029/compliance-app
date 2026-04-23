@@ -53,6 +53,10 @@ const revokeOnboardingSchema = z.object({
   reason: z.string().min(1).max(200).optional(),
 });
 
+const deadLetterNoteSchema = z.object({
+  note: z.string().min(1).max(500).optional(),
+});
+
 function requireComplianceLifecycleAdmin(
   session: AuthenticatedRequest["currentSession"],
 ) {
@@ -62,6 +66,7 @@ function requireComplianceLifecycleAdmin(
 @Controller("v1/compliance")
 @UseGuards(AuthenticatedGuard)
 export class ComplianceController {
+  // Operational procedures for these endpoints live under docs/runbooks/.
   constructor(
     @Inject(ComplianceService)
     private readonly complianceService: ComplianceService,
@@ -88,6 +93,101 @@ export class ComplianceController {
   ) {
     requirePermission(session, "compliance.read");
     return this.complianceService.listComplianceDocuments(session!.organization!.id);
+  }
+
+  @Get("dead-letter")
+  listDeadLetterItems(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+  ) {
+    requirePermission(session, "compliance.read");
+    return this.complianceService.listDeadLetterItems(session!.organization!.id);
+  }
+
+  @Get("dead-letter/:submissionId")
+  getDeadLetterItem(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("submissionId") submissionId: string,
+  ) {
+    requirePermission(session, "compliance.read");
+    return this.complianceService.getDeadLetterItem(
+      session!.organization!.id,
+      submissionId,
+    );
+  }
+
+  @Post("dead-letter/:submissionId/acknowledge")
+  async acknowledgeDeadLetterItem(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("submissionId") submissionId: string,
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.report");
+    const parsed = deadLetterNoteSchema.parse(body ?? {});
+    const deadLetter = await this.complianceService.acknowledgeDeadLetterItem(
+      session!.organization!.id,
+      session!.user!.id,
+      submissionId,
+      parsed.note ?? null,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.dead_letter.acknowledge",
+      targetType: "zatca_submission",
+      targetId: submissionId,
+      result: "SUCCESS",
+    });
+    return deadLetter;
+  }
+
+  @Post("dead-letter/:submissionId/escalate")
+  async escalateDeadLetterItem(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("submissionId") submissionId: string,
+    @Body() body: unknown,
+  ) {
+    requirePermission(session, "compliance.report");
+    const parsed = deadLetterNoteSchema.parse(body ?? {});
+    const deadLetter = await this.complianceService.escalateDeadLetterItem(
+      session!.organization!.id,
+      session!.user!.id,
+      submissionId,
+      parsed.note ?? null,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.dead_letter.escalate",
+      targetType: "zatca_submission",
+      targetId: submissionId,
+      result: "SUCCESS",
+    });
+    return deadLetter;
+  }
+
+  @Post("dead-letter/:submissionId/requeue")
+  async requeueDeadLetterItem(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+    @Param("submissionId") submissionId: string,
+  ) {
+    requirePermission(session, "compliance.report");
+    const deadLetter = await this.complianceService.requeueDeadLetterItem(
+      session!.organization!.id,
+      session!.user!.id,
+      submissionId,
+    );
+    await this.auditService.log({
+      organizationId: session!.organization!.id,
+      actorType: "USER",
+      actorUserId: session!.user!.id,
+      action: "compliance.dead_letter.requeue",
+      targetType: "zatca_submission",
+      targetId: submissionId,
+      result: "SUCCESS",
+    });
+    return deadLetter;
   }
 
   @Get("integration")

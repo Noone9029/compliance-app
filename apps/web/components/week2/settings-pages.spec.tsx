@@ -92,7 +92,9 @@ const { fetchServerJson, getCapabilities } = vi.hoisted(() => ({
       "shell.settings.read",
       "platform.membership.read",
       "platform.membership.manage",
-      "connectors.read"
+      "connectors.read",
+      "connectors.write",
+      "connectors.sync"
     ]
   }))
 }));
@@ -157,15 +159,16 @@ describe("settings pages", () => {
     ).toBeTruthy();
   });
 
-  it("renders connector readiness without customer-visible sync actions", async () => {
+  it("renders connector readiness with live connection controls", async () => {
     render(await renderSettingsPage("nomad-events", ["settings", "connector-settings"]));
 
     expect(fetchServerJson).toHaveBeenCalledWith("/v1/connectors/accounts");
     expect(fetchServerJson).toHaveBeenCalledWith("/v1/connectors/logs");
     expect(screen.getByText("Connector Readiness")).toBeTruthy();
-    expect(screen.getByText("Nomad Events Xero")).toBeTruthy();
+    expect(screen.getByText("Connect accounting providers")).toBeTruthy();
+    expect(screen.getAllByText("Nomad Events Xero").length).toBeGreaterThan(0);
     expect(screen.getByText("Connector Activity Log")).toBeTruthy();
-    expect(screen.queryByText("Run Export Sync")).toBeNull();
-    expect(screen.queryByText("Retry")).toBeNull();
+    expect(screen.getByRole("button", { name: "Reconnect Xero" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Run import sync" })).toBeTruthy();
   });
 });
