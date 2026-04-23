@@ -1,6 +1,8 @@
 import Link from "next/link";
 import React from "react";
 import type {
+  ComplianceDeadLetterDetailRecord,
+  ComplianceDeadLetterRecord,
   ComplianceMonitorInvoiceRecord,
   ComplianceOverviewRecord,
   EInvoiceIntegrationRecord,
@@ -12,28 +14,19 @@ import { Card, CardContent, CardHeader, StatusBadge } from "@daftar/ui";
 import { fetchServerJson } from "../api";
 import { presentContactName } from "../presentation";
 import { ActionButton } from "./action-button";
+import {
+  complianceDocumentStatusMeta,
+  deadLetterStateMeta,
+  failureCategoryMeta,
+  formatGeneralStatusLabel,
+  normalizeOperatorQueueStatus,
+  operatorQueueStatusMeta,
+  submissionStatusMeta,
+  validationStatusMeta,
+} from "./compliance-status";
 import { formatDate, money, toneForComplianceStatus, toneForInvoiceStatus } from "./shared";
 import { getCapabilities, hasPermission } from "../week2/route-utils";
 import { EInvoiceIntegrationPanel } from "../week10/einvoice-integration-panel";
-
-type OperatorQueueStatus =
-  | "QUEUED"
-  | "PROCESSING"
-  | "ACCEPTED"
-  | "ACCEPTED_WITH_WARNINGS"
-  | "REJECTED";
-
-function formatStatusLabel(value: string | null | undefined) {
-  if (!value) {
-    return "Not available";
-  }
-
-  return value
-    .toLowerCase()
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) {
@@ -51,49 +44,6 @@ function formatDateTime(value: string | null | undefined) {
   return `${day} ${hours}:${minutes}`;
 }
 
-function normalizeOperatorQueueStatus(
-  document: ComplianceMonitorInvoiceRecord["compliance"],
-): OperatorQueueStatus {
-  const status = document.submission?.status ?? document.lastSubmissionStatus ?? document.status;
-
-  if (status === "ACCEPTED_WITH_WARNINGS") {
-    return "ACCEPTED_WITH_WARNINGS";
-  }
-
-  if (status === "CLEARED_WITH_WARNINGS" || status === "REPORTED_WITH_WARNINGS") {
-    return "ACCEPTED_WITH_WARNINGS";
-  }
-
-  if (
-    status === "ACCEPTED" ||
-    status === "CLEARED" ||
-    status === "REPORTED"
-  ) {
-    return "ACCEPTED";
-  }
-
-  if (status === "QUEUED" || status === "READY") {
-    return "QUEUED";
-  }
-
-  if (status === "PROCESSING" || status === "RETRY_SCHEDULED") {
-    return "PROCESSING";
-  }
-
-  return "REJECTED";
-}
-
-function toneForOperatorQueueStatus(status: OperatorQueueStatus) {
-  if (status === "ACCEPTED" || status === "ACCEPTED_WITH_WARNINGS") {
-    return "success" as const;
-  }
-
-  if (status === "QUEUED" || status === "PROCESSING") {
-    return "warning" as const;
-  }
-
-  return "neutral" as const;
-}
 
 function takeMessages(messages: string[] | undefined, limit = 2) {
   if (!messages || messages.length === 0) {
@@ -108,19 +58,31 @@ function takeMessages(messages: string[] | undefined, limit = 2) {
   return `${slice.join(" | ")} +${messages.length - limit} more`;
 }
 
-export async function renderCompliancePage(orgSlug: string) {
+export async function renderCompliancePage(
+  orgSlug: string,
+  options?: {
+    deadLetterSubmissionId?: string;
+  },
+) {
   const capabilities = await getCapabilities();
   const canReport = hasPermission(capabilities, "compliance.report");
   const canWrite = hasPermission(capabilities, "compliance.write");
   const canManageLifecycle =
     canWrite && hasPermission(capabilities, "platform.org.manage");
-  const [overview, invoices, integration, reportedDocuments, monitorDocuments] =
+  const deadLetterSubmissionId = options?.deadLetterSubmissionId ?? null;
+  const [overview, invoices, integration, reportedDocuments, monitorDocuments, deadLetterItems, selectedDeadLetter] =
     await Promise.all([
     fetchServerJson<ComplianceOverviewRecord>("/v1/compliance/overview"),
     fetchServerJson<SalesInvoiceSummary[]>("/v1/sales/invoices"),
     fetchServerJson<EInvoiceIntegrationRecord>("/v1/compliance/integration"),
     fetchServerJson<ReportedDocumentRecord[]>("/v1/compliance/reported-documents"),
     fetchServerJson<ComplianceMonitorInvoiceRecord[]>("/v1/compliance/documents"),
+    fetchServerJson<ComplianceDeadLetterRecord[]>("/v1/compliance/dead-letter"),
+    deadLetterSubmissionId
+      ? fetchServerJson<ComplianceDeadLetterDetailRecord>(
+          `/v1/compliance/dead-letter/${deadLetterSubmissionId}`,
+        ).catch(() => null)
+      : Promise.resolve(null),
   ]);
 
   const reportableInvoices = invoices.filter(
@@ -221,6 +183,259 @@ export async function renderCompliancePage(orgSlug: string) {
       <Card>
         <CardHeader>
           <div className="space-y-1">
+            <h2 className="text-xl font-semibold">Dead-letter Remediation</h2>
+            <p className="text-sm text-slate-500">
+              Resolve submissions that exhausted retries and need explicit operator action.
+            </p>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {deadLetterItems.length === 0 ? (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+              No active dead-letter submissions. Automatic retries and latest submissions are currently stable.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead>
+                  <tr className="text-left text-slate-500">
+                    <th className="px-3 py-2 font-medium">Invoice</th>
+                    <th className="px-3 py-2 font-medium">State</th>
+                    <th className="px-3 py-2 font-medium">Failure</th>
+                    <th className="px-3 py-2 font-medium">Failed</th>
+                    <th className="px-3 py-2 font-medium">Retryability</th>
+                    <th className="px-3 py-2 font-medium">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 align-top">
+                  {deadLetterItems.map((item) => {
+                    const deadLetterMeta = deadLetterStateMeta(item.state);
+                    const failureMeta = failureCategoryMeta(item.failureCategory);
+
+                    return (
+                    <tr key={item.submissionId}>
+                      <td className="px-3 py-3">
+                        <div className="space-y-1">
+                          <Link
+                            className="font-medium text-slate-800 underline underline-offset-4"
+                            href={`/${orgSlug}/accounting/sales/${item.salesInvoiceId}`}
+                          >
+                            {item.invoiceNumber}
+                          </Link>
+                          <p className="text-xs text-slate-500">
+                            Submission {item.submissionId.slice(0, 12)}... •{" "}
+                            {formatGeneralStatusLabel(item.submissionFlow)}
+                          </p>
+                          <p className="text-xs text-slate-600">{item.reason}</p>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3">
+                        <StatusBadge
+                          label={`${deadLetterMeta.icon} ${deadLetterMeta.label}`}
+                          tone={deadLetterMeta.tone}
+                        />
+                        <p className="mt-1 text-xs text-slate-500">{deadLetterMeta.operatorDescription}</p>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="space-y-1">
+                          <p className="text-xs text-slate-700">
+                            {failureMeta.label}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            Last error: {item.lastError ?? "Not available"}
+                          </p>
+                          <p className="text-xs text-slate-500">{failureMeta.operatorDescription}</p>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 text-xs text-slate-600">
+                        {formatDateTime(item.failedAt)}
+                      </td>
+                      <td className="px-3 py-3">
+                        <p className="text-xs text-slate-700">
+                          {item.wasRetryable ? "Retryable root cause" : "Terminal root cause"}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Attempts {item.attemptCount}/{item.maxAttempts}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {item.canRequeue ? "Can be requeued" : "Requeue blocked"}
+                        </p>
+                      </td>
+                      <td className="px-3 py-3">
+                        <div className="space-y-2">
+                          <Link
+                            className="inline-flex text-xs font-medium text-slate-700 underline underline-offset-4"
+                            href={`/${orgSlug}/e-invoice-integration/dead-letter/${item.submissionId}`}
+                          >
+                            View detail
+                          </Link>
+                          <ActionButton
+                            canWrite={canReport && item.canRequeue}
+                            endpoint={`/v1/compliance/dead-letter/${item.submissionId}/requeue`}
+                            label="Requeue"
+                            pendingLabel="Requeueing..."
+                          />
+                          <ActionButton
+                            canWrite={canReport}
+                            endpoint={`/v1/compliance/dead-letter/${item.submissionId}/acknowledge`}
+                            label="Acknowledge"
+                            pendingLabel="Saving..."
+                          />
+                          <ActionButton
+                            canWrite={canReport}
+                            endpoint={`/v1/compliance/dead-letter/${item.submissionId}/escalate`}
+                            label="Escalate"
+                            pendingLabel="Escalating..."
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {selectedDeadLetter ? (
+        <Card>
+          <CardHeader>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <h2 className="text-xl font-semibold">Dead-letter Detail</h2>
+                <p className="text-sm text-slate-500">
+                  Submission {selectedDeadLetter.submissionId}
+                </p>
+              </div>
+              <Link
+                className="text-sm font-medium text-slate-700 underline underline-offset-4"
+                href={`/${orgSlug}/e-invoice-integration`}
+              >
+                Close detail
+              </Link>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-4">
+              {(() => {
+                const deadLetterMeta = deadLetterStateMeta(selectedDeadLetter.state);
+                const failureMeta = failureCategoryMeta(selectedDeadLetter.failureCategory);
+                const submissionMeta = submissionStatusMeta(
+                  selectedDeadLetter.submissionStatus,
+                );
+                const complianceMeta = complianceDocumentStatusMeta(
+                  selectedDeadLetter.compliance.status,
+                );
+
+                return (
+                  <>
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge
+                  label={`${deadLetterMeta.icon} ${deadLetterMeta.label}`}
+                  tone={deadLetterMeta.tone}
+                />
+                <StatusBadge
+                  label={`${submissionMeta.icon} ${submissionMeta.label}`}
+                  tone={submissionMeta.tone}
+                />
+                <StatusBadge
+                  label={`${complianceMeta.icon} ${complianceMeta.label}`}
+                  tone={complianceMeta.tone}
+                />
+              </div>
+              <div className="grid gap-3 md:grid-cols-2">
+                <p className="text-sm text-slate-700">
+                  Invoice: {selectedDeadLetter.invoiceNumber}
+                </p>
+                <p className="text-sm text-slate-700">
+                  Failure: {failureMeta.label}
+                </p>
+                <p className="text-sm text-slate-700">
+                  Failed at: {formatDateTime(selectedDeadLetter.failedAt)}
+                </p>
+                <p className="text-sm text-slate-700">
+                  Request ID: {selectedDeadLetter.requestId ?? "Not available"}
+                </p>
+              </div>
+              <p className="text-sm text-slate-700">
+                Reason: {selectedDeadLetter.reason}
+              </p>
+              <p className="text-sm text-slate-600">{failureMeta.operatorDescription}</p>
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-slate-800">
+                  Attempts Timeline
+                </h3>
+                {selectedDeadLetter.compliance.attempts.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    No attempts are available for this submission.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {selectedDeadLetter.compliance.attempts.map((attempt) => (
+                      <div
+                        className="rounded-lg border border-slate-200 bg-slate-50 p-2"
+                        key={attempt.id}
+                      >
+                        <p className="text-xs font-medium text-slate-800">
+                          Attempt {attempt.attemptNumber} •{" "}
+                          {formatGeneralStatusLabel(attempt.status)}
+                        </p>
+                        <p className="text-xs text-slate-600">
+                          {attempt.endpoint}
+                          {attempt.httpStatus ? ` • HTTP ${attempt.httpStatus}` : ""}
+                        </p>
+                        <p className="text-xs text-slate-600">
+                          Started {formatDateTime(attempt.startedAt)}
+                          {attempt.finishedAt
+                            ? ` • Finished ${formatDateTime(attempt.finishedAt)}`
+                            : ""}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div className="space-y-2">
+                <h3 className="text-sm font-semibold text-slate-800">Event Timeline</h3>
+                {selectedDeadLetter.timeline.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    No compliance events are available.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {selectedDeadLetter.timeline.map((entry) => (
+                      <div
+                        className="rounded-lg border border-slate-200 bg-white p-2"
+                        key={entry.id}
+                      >
+                        <p className="text-xs font-medium text-slate-800">
+                          {entry.action}
+                        </p>
+                        <p className="text-xs text-slate-600">
+                          {formatGeneralStatusLabel(entry.status)} •{" "}
+                          {formatDateTime(entry.createdAt)}
+                        </p>
+                        {entry.message ? (
+                          <p className="text-xs text-slate-600">{entry.message}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+                  </>
+                );
+              })()}
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <Card>
+        <CardHeader>
+          <div className="space-y-1">
             <h2 className="text-xl font-semibold">Invoice Compliance Monitor</h2>
             <p className="text-sm text-slate-500">
               Track queued, processing, accepted, and rejected submissions with
@@ -230,9 +445,9 @@ export async function renderCompliancePage(orgSlug: string) {
         </CardHeader>
         <CardContent>
           {monitorDocuments.length === 0 ? (
-            <p className="text-sm text-slate-500">
-              No compliance submission records are available yet.
-            </p>
+            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              No compliance submission records are available yet. Queue an invoice from the reportable list to start tracking attempts, warnings, and responses.
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-slate-200 text-sm">
@@ -249,7 +464,19 @@ export async function renderCompliancePage(orgSlug: string) {
                 <tbody className="divide-y divide-slate-100 align-top">
                   {monitorDocuments.map((item) => {
                     const compliance = item.compliance;
-                    const queueStatus = normalizeOperatorQueueStatus(compliance);
+                    const queueStatus = normalizeOperatorQueueStatus({
+                      status: compliance.status,
+                      lastSubmissionStatus: compliance.lastSubmissionStatus,
+                      submissionStatus: compliance.submission?.status ?? null,
+                    });
+                    const queueMeta = operatorQueueStatusMeta(queueStatus);
+                    const validationMeta = validationStatusMeta(
+                      compliance.localValidation?.status,
+                    );
+                    const failureMeta = failureCategoryMeta(
+                      compliance.failureCategory,
+                    );
+                    const complianceMeta = complianceDocumentStatusMeta(compliance.status);
                     const reported = reportedByInvoiceId.get(item.salesInvoiceId);
                     const latestAttempt = compliance.attempts[0];
                     const requestId =
@@ -279,8 +506,8 @@ export async function renderCompliancePage(orgSlug: string) {
                                 tone={toneForInvoiceStatus(item.invoiceStatus)}
                               />
                               <StatusBadge
-                                label={compliance.status}
-                                tone={toneForComplianceStatus(compliance.status)}
+                                label={`${complianceMeta.icon} ${complianceMeta.label}`}
+                                tone={complianceMeta.tone}
                               />
                             </div>
                           </div>
@@ -288,9 +515,10 @@ export async function renderCompliancePage(orgSlug: string) {
                         <td className="px-3 py-3">
                           <div className="space-y-2">
                             <StatusBadge
-                              label={formatStatusLabel(queueStatus)}
-                              tone={toneForOperatorQueueStatus(queueStatus)}
+                              label={`${queueMeta.icon} ${queueMeta.label}`}
+                              tone={queueMeta.tone}
                             />
+                            <p className="text-xs text-slate-500">{queueMeta.operatorDescription}</p>
                             <p className="text-xs text-slate-500">
                               Last update {formatDateTime(compliance.updatedAt)}
                             </p>
@@ -305,8 +533,9 @@ export async function renderCompliancePage(orgSlug: string) {
                           {compliance.localValidation ? (
                             <div className="space-y-1">
                               <p className="font-medium text-slate-800">
-                                {formatStatusLabel(compliance.localValidation.status)}
+                                {validationMeta.icon} {validationMeta.label}
                               </p>
+                              <p className="text-xs text-slate-500">{validationMeta.operatorDescription}</p>
                               <p className="text-xs text-amber-700">
                                 Warnings:{" "}
                                 {takeMessages(compliance.localValidation.warnings)}
@@ -344,8 +573,11 @@ export async function renderCompliancePage(orgSlug: string) {
                             </p>
                             {compliance.failureCategory ? (
                               <p>
-                                Failure: {formatStatusLabel(compliance.failureCategory)}
+                                Failure: {failureMeta.label}
                               </p>
+                            ) : null}
+                            {compliance.failureCategory ? (
+                              <p>{failureMeta.operatorDescription}</p>
                             ) : null}
                             <p>
                               Submission warnings:{" "}
@@ -377,7 +609,7 @@ export async function renderCompliancePage(orgSlug: string) {
                                   >
                                     <p className="font-medium text-slate-800">
                                       Attempt {attempt.attemptNumber} •{" "}
-                                      {formatStatusLabel(attempt.status)}
+                                      {formatGeneralStatusLabel(attempt.status)}
                                     </p>
                                     <p className="text-xs text-slate-600">
                                       {attempt.endpoint}
@@ -420,7 +652,7 @@ export async function renderCompliancePage(orgSlug: string) {
                               />
                             ) : (
                               <p className="text-xs text-slate-500">
-                                Retry is not available for this status.
+                                Retry is currently blocked. Review failure category and dead-letter state for remediation.
                               </p>
                             )}
                           </div>

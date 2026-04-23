@@ -81,6 +81,9 @@ describe("EInvoiceIntegrationPanel", () => {
 
     expect(screen.getByText("Compliance Timeline")).toBeTruthy();
     expect(screen.getByText("Onboarding Lifecycle")).toBeTruthy();
+    expect(screen.getByText("Lifecycle Progress")).toBeTruthy();
+    expect(screen.getByText("Onboarding Status")).toBeTruthy();
+    expect(screen.getByText("Certificate Status")).toBeTruthy();
     expect(screen.getByText("Prepare Draft")).toBeTruthy();
     expect(screen.getByText("Generate CSR")).toBeTruthy();
     expect(screen.getByText("compliance.integration.onboarded")).toBeTruthy();

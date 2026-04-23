@@ -25,6 +25,7 @@ describe("DocumentDetail", () => {
   it("renders sales invoice detail including compliance metadata", () => {
     render(
       <DocumentDetail
+        canReport
         document={{
           id: "inv_1",
           organizationId: "org_1",
@@ -210,7 +211,7 @@ describe("DocumentDetail", () => {
       })
     ).toBeTruthy();
     expect(screen.getByText("Show History & Notes")).toBeTruthy();
-    expect(screen.getByText("ZATCA Compliance")).toBeTruthy();
+    expect(screen.getByText("Invoice Compliance Status")).toBeTruthy();
     expect(screen.getAllByText("Invoice cleared in sandbox.").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("ITM-1001 · Implementation sprint")).toBeTruthy();
     expect(screen.getByText("Download")).toBeTruthy();
@@ -220,6 +221,103 @@ describe("DocumentDetail", () => {
     expect(screen.getByText("Local SDK Validation")).toBeTruthy();
     expect(screen.getAllByText("REQ-INV-NE-0001").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText(/Rounded tax value adjusted by gateway\./).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("keeps customer-facing compliance section readable and hides operator diagnostics", () => {
+    render(
+      <DocumentDetail
+        document={{
+          id: "inv_client_1",
+          organizationId: "org_1",
+          contactId: "contact_1",
+          contactName: "Al Noor Hospitality",
+          contactEmail: "finance@alnoor.test",
+          invoiceNumber: "INV-CLIENT-0001",
+          status: "ISSUED",
+          complianceInvoiceKind: "SIMPLIFIED",
+          complianceStatus: "REPORTED_WITH_WARNINGS",
+          issueDate: "2026-04-12T09:00:00.000Z",
+          dueDate: "2026-04-22T09:00:00.000Z",
+          currencyCode: "SAR",
+          subtotal: "1000.00",
+          taxTotal: "150.00",
+          total: "1150.00",
+          amountPaid: "0.00",
+          amountDue: "1150.00",
+          notes: "Client view sample",
+          createdAt: "2026-04-12T09:00:00.000Z",
+          updatedAt: "2026-04-12T09:00:00.000Z",
+          lines: [],
+          payments: [],
+          attachments: [],
+          statusEvents: [],
+          compliance: {
+            id: "compliance_client_1",
+            salesInvoiceId: "inv_client_1",
+            invoiceKind: "SIMPLIFIED",
+            submissionFlow: "REPORTING",
+            invoiceCounter: 1,
+            uuid: "uuid-client",
+            qrPayload: "qr-client",
+            previousHash: null,
+            currentHash: "hash-client",
+            xmlAvailable: true,
+            status: "REPORTED_WITH_WARNINGS",
+            lastSubmissionStatus: "ACCEPTED_WITH_WARNINGS",
+            lastSubmittedAt: "2026-04-13T10:00:00.000Z",
+            lastError: null,
+            failureCategory: null,
+            externalSubmissionId: "rep-client",
+            clearedAt: null,
+            reportedAt: "2026-04-13T10:00:00.000Z",
+            localValidation: {
+              status: "PASSED",
+              warnings: [],
+              errors: [],
+            },
+            localValidationMetadata: null,
+            hashMetadata: null,
+            qrMetadata: null,
+            signatureMetadata: null,
+            retryAllowed: false,
+            canShareWithCustomer: true,
+            submission: {
+              id: "submission_client_1",
+              complianceDocumentId: "compliance_client_1",
+              flow: "REPORTING",
+              status: "ACCEPTED_WITH_WARNINGS",
+              retryable: false,
+              attemptCount: 1,
+              maxAttempts: 5,
+              availableAt: "2026-04-13T09:55:00.000Z",
+              nextRetryAt: null,
+              lastAttemptAt: "2026-04-13T10:00:00.000Z",
+              finishedAt: "2026-04-13T10:00:00.000Z",
+              failureCategory: null,
+              externalSubmissionId: "rep-client",
+              errorMessage: null,
+              requestId: "REQ-CLIENT-1",
+              warnings: ["Minor formatting warning"],
+              errors: [],
+              createdAt: "2026-04-13T09:55:00.000Z",
+              updatedAt: "2026-04-13T10:00:00.000Z",
+            },
+            attempts: [],
+            timeline: [],
+            createdAt: "2026-04-13T09:55:00.000Z",
+            updatedAt: "2026-04-13T10:00:00.000Z",
+          },
+        }}
+        kind="sales"
+        orgSlug="nomad-events"
+      />,
+    );
+
+    expect(screen.getByText("Invoice Compliance Status")).toBeTruthy();
+    expect(screen.getByText("Detailed compliance diagnostics are limited to authorized operators.")).toBeTruthy();
+    expect(screen.queryByText("Operator Diagnostics")).toBeNull();
+    expect(screen.queryByText("Transport Attempts")).toBeNull();
+    expect(screen.queryByText("Local SDK Validation")).toBeNull();
   });
 
   it("renders quote conversion link when a quote has been converted", () => {

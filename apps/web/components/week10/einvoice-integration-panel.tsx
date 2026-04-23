@@ -6,6 +6,11 @@ import type { EInvoiceIntegrationRecord } from "@daftar/types";
 import { Button, Card, CardContent, CardHeader, StatusBadge } from "@daftar/ui";
 
 import { presentOrganizationName } from "../presentation";
+import {
+  certificateStatusMeta,
+  formatGeneralStatusLabel,
+  onboardingStatusMeta,
+} from "../week3/compliance-status";
 
 function actionClass(tone: "green" | "red" | "slate") {
   if (tone === "green") {
@@ -17,18 +22,6 @@ function actionClass(tone: "green" | "red" | "slate") {
   }
 
   return "bg-slate-700 hover:bg-slate-600";
-}
-
-function statusLabel(value: string | null | undefined) {
-  if (!value) {
-    return "Not Started";
-  }
-
-  return value
-    .toLowerCase()
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function presentTimestamp(value: string | null | undefined) {
@@ -92,6 +85,43 @@ export function EInvoiceIntegrationPanel(props: {
 
   const onboardingStatus = onboarding?.status ?? "NOT_STARTED";
   const certificateStatus = onboarding?.certificateStatus ?? "NOT_REQUESTED";
+  const onboardingMeta = onboardingStatusMeta(onboardingStatus);
+  const certificateMeta = certificateStatusMeta(certificateStatus);
+  const lifecycleSteps = [
+    {
+      key: "prepare",
+      title: "Prepare Device Profile",
+      done: Boolean(onboarding?.id),
+      detail: onboarding?.id
+        ? `Device ${onboarding.deviceSerial} is saved.`
+        : "Create a draft with legal identity and device serial first.",
+    },
+    {
+      key: "csr",
+      title: "Generate CSR",
+      done: Boolean(onboarding?.hasCsr),
+      detail: onboarding?.hasCsr
+        ? `CSR generated at ${presentTimestamp(onboarding?.csrGeneratedAt)}.`
+        : "Generate CSR to move into OTP flow.",
+    },
+    {
+      key: "otp",
+      title: "Submit OTP",
+      done: Boolean(onboarding?.otpReceivedAt),
+      detail: onboarding?.otpReceivedAt
+        ? `OTP received at ${presentTimestamp(onboarding?.otpReceivedAt)}.`
+        : "Request OTP from ZATCA and submit it here.",
+    },
+    {
+      key: "activate",
+      title: "Activate Certificate",
+      done: onboardingStatus === "ACTIVE" && certificateStatus === "ACTIVE",
+      detail:
+        onboardingStatus === "ACTIVE" && certificateStatus === "ACTIVE"
+          ? `Active since ${presentTimestamp(onboarding?.lastActivatedAt)}.`
+          : "Activate after certificate issuance to enable submissions.",
+    },
+  ] as const;
 
   function clearFeedback() {
     setError(null);
@@ -110,6 +140,15 @@ export function EInvoiceIntegrationPanel(props: {
 
     const message = await response.text();
     return message || "Action failed.";
+  }
+
+  function successMessageForLifecycle(path: string) {
+    if (path.endsWith("/generate-csr")) return "CSR generated.";
+    if (path.endsWith("/request-otp")) return "OTP request state recorded.";
+    if (path.endsWith("/activate")) return "Device activation completed.";
+    if (path.endsWith("/revoke")) return "Device was revoked.";
+    if (path.endsWith("/prepare")) return "Onboarding draft prepared.";
+    return "Action completed.";
   }
 
   function withOnboardingId(callback: (onboardingId: string) => Promise<boolean>) {
@@ -142,7 +181,7 @@ export function EInvoiceIntegrationPanel(props: {
         return;
       }
 
-      setSuccess("Action completed.");
+      setSuccess(successMessageForLifecycle(path));
       router.refresh();
     });
   }
@@ -267,6 +306,21 @@ export function EInvoiceIntegrationPanel(props: {
           </div>
         </CardHeader>
         <CardContent className="space-y-6">
+          {isPending ? (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              Processing your request. The view will refresh when the action completes.
+            </p>
+          ) : null}
+          {error ? (
+            <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {error}
+            </p>
+          ) : null}
+          {success ? (
+            <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              {success}
+            </p>
+          ) : null}
           <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="space-y-2">
@@ -300,13 +354,23 @@ export function EInvoiceIntegrationPanel(props: {
                   tone={props.integration.status === "REGISTERED" ? "success" : "warning"}
                 />
                 <StatusBadge
-                  label={statusLabel(onboardingStatus)}
-                  tone={onboardingStatus === "ACTIVE" ? "success" : "warning"}
+                  label={`${onboardingMeta.icon} ${onboardingMeta.label}`}
+                  tone={onboardingMeta.tone}
                 />
                 <StatusBadge
-                  label={statusLabel(certificateStatus)}
-                  tone={certificateStatus === "ACTIVE" ? "success" : "warning"}
+                  label={`${certificateMeta.icon} ${certificateMeta.label}`}
+                  tone={certificateMeta.tone}
                 />
+              </div>
+            </div>
+            <div className="mt-3 grid gap-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 md:grid-cols-2">
+              <div className="space-y-1">
+                <p className="font-medium text-slate-800">Onboarding Status</p>
+                <p>{onboardingMeta.description}</p>
+              </div>
+              <div className="space-y-1">
+                <p className="font-medium text-slate-800">Certificate Status</p>
+                <p>{certificateMeta.description}</p>
               </div>
             </div>
             {onboarding ? (
@@ -333,6 +397,27 @@ export function EInvoiceIntegrationPanel(props: {
                 {onboarding.lastError}
               </p>
             ) : null}
+            <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4">
+              <p className="text-sm font-medium text-slate-900">Lifecycle Progress</p>
+              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                {lifecycleSteps.map((step) => (
+                  <div
+                    className={[
+                      "rounded-lg border px-3 py-2 text-sm",
+                      step.done
+                        ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                        : "border-slate-200 bg-slate-50 text-slate-700",
+                    ].join(" ")}
+                    key={step.key}
+                  >
+                    <p className="font-medium">
+                      {step.done ? "OK" : "PEND"} {step.title}
+                    </p>
+                    <p className="mt-1 text-xs">{step.detail}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -435,7 +520,8 @@ export function EInvoiceIntegrationPanel(props: {
               />
             </label>
 
-            <div className="mt-5 flex flex-wrap items-center gap-2">
+            <p className="mt-5 text-sm font-medium text-slate-800">Step 1-2 Actions</p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
               <Button
                 className={actionClass("green")}
                 disabled={!props.canManageLifecycle || isPending}
@@ -493,6 +579,7 @@ export function EInvoiceIntegrationPanel(props: {
               </Button>
             </div>
 
+            <p className="mt-4 text-sm font-medium text-slate-800">Step 3: OTP Submission</p>
             <div className="mt-4 grid gap-2 md:grid-cols-[1fr_auto]">
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -516,6 +603,7 @@ export function EInvoiceIntegrationPanel(props: {
               </Button>
             </div>
 
+            <p className="mt-3 text-sm font-medium text-slate-800">Step 4: Certificate Renewal</p>
             <div className="mt-3 grid gap-2 md:grid-cols-[1fr_auto]">
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -539,6 +627,7 @@ export function EInvoiceIntegrationPanel(props: {
               </Button>
             </div>
 
+            <p className="mt-3 text-sm font-medium text-slate-800">Step 5: Revocation</p>
             <div className="mt-3 grid gap-2 md:grid-cols-[1fr_auto]">
               <input
                 className="rounded-md border border-slate-300 px-3 py-2 text-sm"
@@ -576,7 +665,9 @@ export function EInvoiceIntegrationPanel(props: {
             </div>
             <div className="mt-5 space-y-3">
               {props.integration.timeline.length === 0 ? (
-                <p className="text-sm text-slate-500">No compliance events recorded yet.</p>
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  No compliance events recorded yet. Lifecycle events will appear here after onboarding actions.
+                </div>
               ) : (
                 props.integration.timeline.map((event) => (
                   <div
@@ -585,7 +676,8 @@ export function EInvoiceIntegrationPanel(props: {
                   >
                     <p className="font-medium text-slate-900">{event.action}</p>
                     <p className="text-slate-600">
-                      {event.status} • {event.createdAt.slice(0, 19).replace("T", " ")}
+                      {formatGeneralStatusLabel(event.status)} •{" "}
+                      {event.createdAt.slice(0, 19).replace("T", " ")}
                     </p>
                     <p className="text-slate-600">{event.message ?? "No message recorded."}</p>
                   </div>
@@ -622,41 +714,47 @@ export function EInvoiceIntegrationPanel(props: {
             </div>
 
             <div className="mt-5 overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-sm">
-                <thead>
-                  <tr className="text-left text-slate-500">
-                    <th className="px-3 py-2 font-medium">Account Name</th>
-                    <th className="px-3 py-2 font-medium">Payment Means Code</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {props.integration.mappings.map((entry) => (
-                    <tr key={entry.bankAccountId}>
-                      <td className="px-3 py-3 text-slate-800">{entry.accountName}</td>
-                      <td className="px-3 py-3">
-                        <select
-                          className="w-full rounded-md border border-slate-300 px-3 py-2"
-                          disabled={!props.canWrite || isPending}
-                          onChange={(event) =>
-                            setMappings((current) => ({
-                              ...current,
-                              [entry.bankAccountId]: event.target.value,
-                            }))
-                          }
-                          value={mappings[entry.bankAccountId] ?? ""}
-                        >
-                          <option value="">Select…</option>
-                          {props.integration.availablePaymentMeans.map((option) => (
-                            <option key={option.code} value={option.code}>
-                              {option.code} - {option.label}
-                            </option>
-                          ))}
-                        </select>
-                      </td>
+              {props.integration.mappings.length === 0 ? (
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  No bank accounts are available yet. Add at least one bank account to configure payment means mapping.
+                </div>
+              ) : (
+                <table className="min-w-full divide-y divide-slate-200 text-sm">
+                  <thead>
+                    <tr className="text-left text-slate-500">
+                      <th className="px-3 py-2 font-medium">Account Name</th>
+                      <th className="px-3 py-2 font-medium">Payment Means Code</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {props.integration.mappings.map((entry) => (
+                      <tr key={entry.bankAccountId}>
+                        <td className="px-3 py-3 text-slate-800">{entry.accountName}</td>
+                        <td className="px-3 py-3">
+                          <select
+                            className="w-full rounded-md border border-slate-300 px-3 py-2"
+                            disabled={!props.canWrite || isPending}
+                            onChange={(event) =>
+                              setMappings((current) => ({
+                                ...current,
+                                [entry.bankAccountId]: event.target.value,
+                              }))
+                            }
+                            value={mappings[entry.bankAccountId] ?? ""}
+                          >
+                            <option value="">Select…</option>
+                            {props.integration.availablePaymentMeans.map((option) => (
+                              <option key={option.code} value={option.code}>
+                                {option.code} - {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
 
             <div className="mt-5 flex flex-wrap items-center gap-3">
@@ -668,8 +766,6 @@ export function EInvoiceIntegrationPanel(props: {
               >
                 Save Payment Means
               </Button>
-              {error ? <p className="text-sm text-rose-600">{error}</p> : null}
-              {success ? <p className="text-sm text-emerald-700">{success}</p> : null}
             </div>
           </div>
         </CardContent>

@@ -13,6 +13,13 @@ import { DocumentActions } from "./document-actions";
 import { InvoiceReportButton } from "./invoice-report-button";
 import { presentContactName, presentEmail } from "../presentation";
 import {
+  complianceDocumentStatusMeta,
+  failureCategoryMeta,
+  formatGeneralStatusLabel,
+  submissionStatusMeta,
+  validationStatusMeta,
+} from "./compliance-status";
+import {
   formatDate,
   money,
   toneForBillStatus,
@@ -139,18 +146,6 @@ function formatInvoiceStatus(document: SalesInvoiceDetail) {
 
 function exportLabel(kind: SalesInvoiceDetail["complianceInvoiceKind"]) {
   return kind === "SIMPLIFIED" ? "Simplified Invoice" : "Tax Invoice";
-}
-
-function formatStatusLabel(status: string | null | undefined) {
-  if (!status) {
-    return "Pending";
-  }
-
-  return status
-    .toLowerCase()
-    .split("_")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
 }
 
 function canEditSalesInvoice(document: SalesInvoiceDetail) {
@@ -296,7 +291,7 @@ function SalesInvoiceDetailView({
               </div>
               {reportedAt ? (
                 <div className="inline-flex min-h-10 items-center justify-center rounded-md border border-emerald-300 bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700">
-                  {formatStatusLabel(document.compliance?.status)} ({reportedAt})
+                  {formatGeneralStatusLabel(document.compliance?.status)} ({reportedAt})
                 </div>
               ) : null}
               <details className="relative">
@@ -423,7 +418,7 @@ function SalesInvoiceDetailView({
               label="Compliance"
               value={
                 document.complianceStatus
-                  ? formatStatusLabel(document.complianceStatus)
+                  ? formatGeneralStatusLabel(document.complianceStatus)
                   : "Pending"
               }
             />
@@ -475,6 +470,7 @@ function SalesInvoiceDetailView({
               />
               <StatusEventsCard events={document.statusEvents} />
               <ComplianceResponseCard
+                canReport={canReport}
                 compliance={document.compliance}
                 reportedDocument={reportedDocument}
               />
@@ -639,9 +635,11 @@ function NotesCard({ notes }: { notes: string | null }) {
 }
 
 function ComplianceResponseCard({
+  canReport,
   compliance,
   reportedDocument
 }: {
+  canReport: boolean;
   compliance: SalesInvoiceDetail["compliance"];
   reportedDocument: ReportedDocumentRecord | null;
 }) {
@@ -649,20 +647,81 @@ function ComplianceResponseCard({
     return null;
   }
 
+  const lifecycleMeta = complianceDocumentStatusMeta(
+    compliance?.status ?? (reportedDocument?.status as any) ?? null,
+  );
+  const submissionMeta = submissionStatusMeta(
+    compliance?.submission?.status ??
+      compliance?.lastSubmissionStatus ??
+      reportedDocument?.lastSubmissionStatus ??
+      null,
+  );
+  const failureMeta = failureCategoryMeta(
+    compliance?.failureCategory ?? reportedDocument?.failureCategory ?? null,
+  );
+  const validationMeta = validationStatusMeta(compliance?.localValidation?.status ?? null);
+  const submittedAt =
+    formatReportedAt(
+      compliance?.clearedAt ??
+        compliance?.reportedAt ??
+        reportedDocument?.submittedAt ??
+        compliance?.lastSubmittedAt,
+    ) ?? "---";
+  const responseMessage =
+    reportedDocument?.responseMessage ??
+    compliance?.lastError ??
+    "No authority response message is available yet.";
+  const requestId =
+    compliance?.submission?.requestId ??
+    compliance?.attempts.find((attempt) => attempt.requestId)?.requestId ??
+    "---";
+  const hasWarningsOrErrors = Boolean(
+    (compliance?.submission?.warnings.length ?? 0) ||
+      (compliance?.submission?.errors.length ?? 0),
+  );
+
   return (
     <Card className="border-slate-200 shadow-none" id="compliance-response">
       <CardHeader>
-        <h3 className="text-lg font-semibold text-slate-950">ZATCA Compliance</h3>
+        <div className="space-y-1">
+          <h3 className="text-lg font-semibold text-slate-950">Invoice Compliance Status</h3>
+          <p className="text-sm text-slate-500">
+            Track authority reporting/clearance status and submission quality.
+          </p>
+        </div>
       </CardHeader>
       <CardContent className="space-y-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge
+            label={`${lifecycleMeta.icon} ${canReport ? lifecycleMeta.label : lifecycleMeta.clientLabel}`}
+            tone={lifecycleMeta.tone}
+          />
+          <StatusBadge
+            label={`${submissionMeta.icon} ${submissionMeta.label}`}
+            tone={submissionMeta.tone}
+          />
+          {compliance?.localValidation ? (
+            <StatusBadge
+              label={`${validationMeta.icon} ${validationMeta.label}`}
+              tone={validationMeta.tone}
+            />
+          ) : null}
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          {canReport ? lifecycleMeta.operatorDescription : lifecycleMeta.clientDescription}
+        </div>
         <div className="grid gap-4 text-sm md:grid-cols-2">
           <ComplianceValue
-            label="Lifecycle Status"
-            value={formatStatusLabel(compliance?.status ?? reportedDocument?.status)}
+            label={canReport ? "Lifecycle Status" : "Customer Status"}
+            value={
+              canReport
+                ? lifecycleMeta.label
+                : lifecycleMeta.clientLabel
+            }
           />
           <ComplianceValue
             label="Submission Flow"
-            value={formatStatusLabel(compliance?.submissionFlow ?? reportedDocument?.submissionFlow)}
+            value={formatGeneralStatusLabel(compliance?.submissionFlow ?? reportedDocument?.submissionFlow)}
           />
           <ComplianceValue
             label="Response Code"
@@ -685,177 +744,199 @@ function ComplianceResponseCard({
           />
           <ComplianceValue
             label="Response Message"
-            value={
-              reportedDocument?.responseMessage ??
-              compliance?.lastError ??
-              "No response log available."
-            }
+            value={responseMessage}
           />
           <ComplianceValue
             label="Failure Category"
-            value={formatStatusLabel(compliance?.failureCategory)}
-          />
-          <ComplianceValue
-            label="UUID"
-            value={compliance?.uuid ?? "---"}
-          />
-          <ComplianceValue
-            label="External Submission ID"
             value={
-              compliance?.externalSubmissionId ??
-              reportedDocument?.externalSubmissionId ??
-              "---"
+              canReport ? failureMeta.label : failureMeta.clientLabel
             }
           />
           <ComplianceValue
             label="Request ID"
-            value={
-              compliance?.submission?.requestId ??
-              compliance?.attempts.find((attempt) => attempt.requestId)?.requestId ??
-              "---"
-            }
+            value={canReport ? requestId : "Hidden for customer-facing view"}
           />
-          <ComplianceValue label="Invoice Counter" value={String(compliance?.invoiceCounter ?? "---")} />
-          <ComplianceValue label="Current Hash" value={compliance?.currentHash ?? "---"} />
-          <ComplianceValue
-            label="Previous Hash"
-            value={compliance?.previousHash ?? "First document hash"}
-          />
-          <ComplianceValue label="QR Payload" value={compliance?.qrPayload ?? "---"} />
         </div>
 
-        {compliance?.submission ? (
-          <Card className="border-slate-200 shadow-none">
-            <CardHeader>
-              <h4 className="text-base font-semibold text-slate-950">Current Submission</h4>
-            </CardHeader>
-            <CardContent className="grid gap-4 text-sm md:grid-cols-2">
-              <ComplianceValue
-                label="Queue Status"
-                value={formatStatusLabel(compliance.submission.status)}
-              />
-              <ComplianceValue
-                label="Attempts"
-                value={`${compliance.submission.attemptCount}/${compliance.submission.maxAttempts}`}
-              />
-              <ComplianceValue
-                label="Next Retry"
-                value={formatReportedAt(compliance.submission.nextRetryAt) ?? "---"}
-              />
-              <ComplianceValue
-                label="Error"
-                value={compliance.submission.errorMessage ?? "---"}
-              />
-              <ComplianceValue
-                label="Request ID"
-                value={compliance.submission.requestId ?? "---"}
-              />
-            </CardContent>
-            {compliance.submission.warnings.length || compliance.submission.errors.length ? (
-              <CardContent className="space-y-2 pt-0 text-sm">
-                {compliance.submission.warnings.length ? (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">
-                    <p className="font-medium">ZATCA Warnings</p>
-                    <p>{compliance.submission.warnings.join(" | ")}</p>
-                  </div>
-                ) : null}
-                {compliance.submission.errors.length ? (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
-                    <p className="font-medium">ZATCA Errors</p>
-                    <p>{compliance.submission.errors.join(" | ")}</p>
-                  </div>
-                ) : null}
-              </CardContent>
-            ) : null}
-          </Card>
+        {!canReport ? (
+          <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
+            Detailed compliance diagnostics are limited to authorized operators.
+          </div>
         ) : null}
 
-        {compliance?.localValidation ? (
-          <Card className="border-slate-200 shadow-none">
-            <CardHeader>
-              <h4 className="text-base font-semibold text-slate-950">Local SDK Validation</h4>
-            </CardHeader>
-            <CardContent className="space-y-2 text-sm">
-              <ComplianceValue
-                label="Validation Status"
-                value={formatStatusLabel(compliance.localValidation.status)}
-              />
-              {compliance.localValidation.warnings.length ? (
+        {hasWarningsOrErrors ? (
+          canReport ? (
+            <div className="space-y-2 text-sm">
+              {(compliance?.submission?.warnings.length ?? 0) > 0 ? (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">
                   <p className="font-medium">Warnings</p>
-                  <p>{compliance.localValidation.warnings.join(" | ")}</p>
+                  <p>{compliance?.submission?.warnings.join(" | ")}</p>
                 </div>
               ) : null}
-              {compliance.localValidation.errors.length ? (
+              {(compliance?.submission?.errors.length ?? 0) > 0 ? (
                 <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
                   <p className="font-medium">Errors</p>
-                  <p>{compliance.localValidation.errors.join(" | ")}</p>
+                  <p>{compliance?.submission?.errors.join(" | ")}</p>
                 </div>
               ) : null}
-            </CardContent>
-          </Card>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              This invoice includes compliance notes. Authorized operators can review detailed diagnostics internally.
+            </div>
+          )
         ) : null}
 
-        {compliance?.attempts.length ? (
-          <Card className="border-slate-200 shadow-none">
-            <CardHeader>
-              <h4 className="text-base font-semibold text-slate-950">Transport Attempts</h4>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              {compliance.attempts.map((attempt) => (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4" key={attempt.id}>
-                  <p className="font-medium text-slate-900">
-                    Attempt {attempt.attemptNumber} • {formatStatusLabel(attempt.status)}
-                  </p>
-                  <p className="text-slate-600">
-                    {attempt.endpoint}
-                    {attempt.httpStatus ? ` • HTTP ${attempt.httpStatus}` : ""}
-                  </p>
-                  <p className="text-slate-600">
-                    Started {formatReportedAt(attempt.startedAt) ?? "---"}
-                    {attempt.finishedAt
-                      ? ` • Finished ${formatReportedAt(attempt.finishedAt)}`
-                      : ""}
-                  </p>
-                  {attempt.requestId ? (
-                    <p className="text-slate-600">Request ID: {attempt.requestId}</p>
-                  ) : null}
-                  {attempt.warnings.length ? (
-                    <p className="text-amber-700">
-                      Warnings: {attempt.warnings.join(" | ")}
-                    </p>
-                  ) : null}
-                  {attempt.errors.length ? (
-                    <p className="text-rose-700">Errors: {attempt.errors.join(" | ")}</p>
-                  ) : null}
-                  <p className="text-slate-600">
-                    {attempt.errorMessage ??
-                      formatStatusLabel(attempt.failureCategory) ??
-                      "No transport error recorded."}
-                  </p>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-        ) : null}
+        {canReport && compliance ? (
+          <details className="rounded-xl border border-slate-200 bg-slate-50" open>
+            <summary className="cursor-pointer list-none px-4 py-3 text-sm font-semibold text-slate-800 [&::-webkit-details-marker]:hidden">
+              Operator Diagnostics
+            </summary>
+            <div className="space-y-4 border-t border-slate-200 px-4 py-4">
+              <div className="grid gap-4 text-sm md:grid-cols-2">
+                <ComplianceValue label="UUID" value={compliance.uuid ?? "---"} />
+                <ComplianceValue
+                  label="External Submission ID"
+                  value={
+                    compliance.externalSubmissionId ??
+                    reportedDocument?.externalSubmissionId ??
+                    "---"
+                  }
+                />
+                <ComplianceValue
+                  label="Request ID"
+                  value={requestId}
+                />
+                <ComplianceValue
+                  label="Failure Category"
+                  value={failureMeta.label}
+                />
+                <ComplianceValue
+                  label="Invoice Counter"
+                  value={String(compliance.invoiceCounter ?? "---")}
+                />
+                <ComplianceValue label="Current Hash" value={compliance.currentHash ?? "---"} />
+                <ComplianceValue
+                  label="Previous Hash"
+                  value={compliance.previousHash ?? "First document hash"}
+                />
+                <ComplianceValue label="QR Payload" value={compliance.qrPayload ?? "---"} />
+              </div>
 
-        {compliance?.timeline.length ? (
-          <Card className="border-slate-200 shadow-none">
-            <CardHeader>
-              <h4 className="text-base font-semibold text-slate-950">Compliance Timeline</h4>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              {compliance.timeline.map((event) => (
-                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4" key={event.id}>
-                  <p className="font-medium text-slate-900">{event.action}</p>
-                  <p className="text-slate-600">
-                    {formatStatusLabel(event.status)} • {formatReportedAt(event.createdAt) ?? "---"}
-                  </p>
-                  <p className="text-slate-600">{event.message ?? "No message recorded."}</p>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
+              {compliance.submission ? (
+                <Card className="border-slate-200 shadow-none">
+                  <CardHeader>
+                    <h4 className="text-base font-semibold text-slate-950">Current Submission</h4>
+                  </CardHeader>
+                  <CardContent className="grid gap-4 text-sm md:grid-cols-2">
+                    <ComplianceValue
+                      label="Queue Status"
+                      value={formatGeneralStatusLabel(compliance.submission.status)}
+                    />
+                    <ComplianceValue
+                      label="Attempts"
+                      value={`${compliance.submission.attemptCount}/${compliance.submission.maxAttempts}`}
+                    />
+                    <ComplianceValue
+                      label="Next Retry"
+                      value={formatReportedAt(compliance.submission.nextRetryAt) ?? "---"}
+                    />
+                    <ComplianceValue
+                      label="Error"
+                      value={compliance.submission.errorMessage ?? "---"}
+                    />
+                    <ComplianceValue
+                      label="Request ID"
+                      value={compliance.submission.requestId ?? "---"}
+                    />
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {compliance.localValidation ? (
+                <Card className="border-slate-200 shadow-none">
+                  <CardHeader>
+                    <h4 className="text-base font-semibold text-slate-950">Local SDK Validation</h4>
+                  </CardHeader>
+                  <CardContent className="space-y-2 text-sm">
+                    <ComplianceValue
+                      label="Validation Status"
+                      value={validationMeta.label}
+                    />
+                    {compliance.localValidation.warnings.length ? (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">
+                        <p className="font-medium">Warnings</p>
+                        <p>{compliance.localValidation.warnings.join(" | ")}</p>
+                      </div>
+                    ) : null}
+                    {compliance.localValidation.errors.length ? (
+                      <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-rose-800">
+                        <p className="font-medium">Errors</p>
+                        <p>{compliance.localValidation.errors.join(" | ")}</p>
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {compliance.attempts.length ? (
+                <Card className="border-slate-200 shadow-none">
+                  <CardHeader>
+                    <h4 className="text-base font-semibold text-slate-950">Transport Attempts</h4>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm">
+                    {compliance.attempts.map((attempt) => (
+                      <div className="rounded-xl border border-slate-200 bg-white p-4" key={attempt.id}>
+                        <p className="font-medium text-slate-900">
+                          Attempt {attempt.attemptNumber} • {formatGeneralStatusLabel(attempt.status)}
+                        </p>
+                        <p className="text-slate-600">
+                          {attempt.endpoint}
+                          {attempt.httpStatus ? ` • HTTP ${attempt.httpStatus}` : ""}
+                        </p>
+                        <p className="text-slate-600">
+                          Started {formatReportedAt(attempt.startedAt) ?? "---"}
+                          {attempt.finishedAt
+                            ? ` • Finished ${formatReportedAt(attempt.finishedAt)}`
+                            : ""}
+                        </p>
+                        {attempt.requestId ? (
+                          <p className="text-slate-600">Request ID: {attempt.requestId}</p>
+                        ) : null}
+                        {attempt.warnings.length ? (
+                          <p className="text-amber-700">
+                            Warnings: {attempt.warnings.join(" | ")}
+                          </p>
+                        ) : null}
+                        {attempt.errors.length ? (
+                          <p className="text-rose-700">Errors: {attempt.errors.join(" | ")}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              ) : null}
+
+              {compliance.timeline.length ? (
+                <Card className="border-slate-200 shadow-none">
+                  <CardHeader>
+                    <h4 className="text-base font-semibold text-slate-950">Compliance Timeline</h4>
+                  </CardHeader>
+                  <CardContent className="space-y-3 text-sm">
+                    {compliance.timeline.map((event) => (
+                      <div className="rounded-xl border border-slate-200 bg-white p-4" key={event.id}>
+                        <p className="font-medium text-slate-900">{event.action}</p>
+                        <p className="text-slate-600">
+                          {formatGeneralStatusLabel(event.status)} • {formatReportedAt(event.createdAt) ?? "---"}
+                        </p>
+                        <p className="text-slate-600">{event.message ?? "No message recorded."}</p>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              ) : null}
+            </div>
+          </details>
         ) : null}
       </CardContent>
     </Card>
