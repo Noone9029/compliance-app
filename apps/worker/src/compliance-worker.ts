@@ -3,7 +3,10 @@ import IORedis from "ioredis";
 import { PrismaClient } from "@prisma/client";
 
 import { loadEnv, queueNames } from "@daftar/config";
-import { enqueueComplianceSubmission } from "../../api/src/modules/compliance/compliance-queue";
+import {
+  enqueueComplianceDeadLetter,
+  enqueueComplianceSubmission,
+} from "../../api/src/modules/compliance/compliance-queue";
 import { processComplianceSubmission } from "../../api/src/modules/compliance/compliance-processor";
 import {
   createComplianceTransportClient,
@@ -33,6 +36,17 @@ export async function createComplianceWorkerRuntime() {
           await enqueueComplianceSubmission({
             submissionId,
             delayMs,
+          });
+        },
+        enqueueDeadLetter: async (job) => {
+          await enqueueComplianceDeadLetter({
+            job: {
+              submissionId: job.submissionId,
+              reason: job.reason,
+              failureCategory: job.failureCategory,
+              attemptNumber: job.attemptNumber,
+              failedAt: job.failedAt.toISOString(),
+            },
           });
         },
       }),

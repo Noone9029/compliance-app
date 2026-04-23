@@ -41,8 +41,11 @@ export const baseEnvSchema = z.object({
   ZATCA_BASE_URL: z.string().min(1).default("https://gw-fatoora.zatca.gov.sa"),
   ZATCA_SDK_CLI_PATH: z.string().min(1).default("fatoora"),
   ZATCA_LOCAL_VALIDATION_MODE: z.enum(["required", "best-effort"]).default("required"),
-  ZATCA_CLIENT_ID: z.string().min(1).default("placeholder"),
-  ZATCA_CLIENT_SECRET: z.string().min(1).default("placeholder")
+  COMPLIANCE_ENCRYPTION_KEY: z
+    .string()
+    .min(1)
+    .default("compliance-encryption-local-dev-key"),
+  COMPLIANCE_ENCRYPTION_PREVIOUS_KEYS: z.string().default("")
 });
 
 export type DaftarEnv = z.infer<typeof baseEnvSchema>;
@@ -109,7 +112,8 @@ export function loadEnv(input: NodeJS.ProcessEnv = {}): DaftarEnv {
 
 export const queueNames = {
   platform: "platform-events",
-  complianceSubmissions: "compliance-submissions"
+  complianceSubmissions: "compliance-submissions",
+  complianceDeadLetter: "compliance-submissions-dead-letter",
 } as const;
 
 export const featureFlags = {

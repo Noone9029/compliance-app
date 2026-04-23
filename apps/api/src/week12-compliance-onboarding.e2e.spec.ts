@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 import { calculateRetryDelayMs } from "./modules/compliance/compliance-core";
+import { ComplianceEncryptionService } from "./modules/compliance/encryption.service";
 import { processComplianceSubmission } from "./modules/compliance/compliance-processor";
 import {
   ComplianceTransportError,
@@ -21,6 +22,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     },
   });
   let app: INestApplication;
+  const complianceEncryptionService = new ComplianceEncryptionService(loadEnv());
 
   async function signIn(email: string) {
     const response = await request(app.getHttpServer())
@@ -74,6 +76,33 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     }
   });
 
+  it("exposes compliance monitor documents without secret-bearing fields", async () => {
+    const cookies = await signIn("admin@daftar.local");
+    await switchOrg(cookies, "nomad-events");
+
+    const monitor = await request(app.getHttpServer())
+      .get("/v1/compliance/documents")
+      .set("Cookie", cookies)
+      .expect(200);
+
+    expect(Array.isArray(monitor.body)).toBe(true);
+
+    if (monitor.body.length > 0) {
+      const first = monitor.body[0] as {
+        compliance?: Record<string, unknown>;
+      };
+      expect(first).toHaveProperty("salesInvoiceId");
+      expect(first).toHaveProperty("invoiceNumber");
+      expect(first).toHaveProperty("invoiceStatus");
+      expect(first).toHaveProperty("compliance");
+
+      const compliance = first.compliance ?? {};
+      expect("xmlContent" in compliance).toBe(false);
+      expect("requestPayload" in compliance).toBe(false);
+      expect("responsePayload" in compliance).toBe(false);
+    }
+  });
+
   it("runs onboarding through compliance issuance, activation, renewal, and revocation", async () => {
     const cookies = await signIn("admin@daftar.local");
     await switchOrg(cookies, "nomad-events");
@@ -116,6 +145,13 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(generated.body.certificateStatus).toBe("CSR_GENERATED");
     expect(generated.body.hasCsr).toBe(true);
     expect(generated.body.csrGeneratedAt).toBeTruthy();
+    const storedAfterCsr = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: prepared.body.id },
+      select: { privateKeyPem: true },
+    });
+    expect(storedAfterCsr.privateKeyPem).toBeTruthy();
+    expect(storedAfterCsr.privateKeyPem).toMatch(/^enc:v1:/);
+    expect(storedAfterCsr.privateKeyPem).not.toContain("BEGIN PRIVATE KEY");
 
     const pendingOtp = await request(app.getHttpServer())
       .post(`/v1/compliance/onboarding/${prepared.body.id}/request-otp`)
@@ -136,6 +172,12 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect("otpCode" in submittedOtp.body).toBe(false);
     expect("certificateSecret" in submittedOtp.body).toBe(false);
     expect("certificatePem" in submittedOtp.body).toBe(false);
+    const storedAfterOtp = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: prepared.body.id },
+      select: { certificateSecret: true },
+    });
+    expect(storedAfterOtp.certificateSecret).toBeTruthy();
+    expect(storedAfterOtp.certificateSecret).toMatch(/^enc:v1:/);
 
     const activated = await request(app.getHttpServer())
       .post(`/v1/compliance/onboarding/${prepared.body.id}/activate`)
@@ -154,6 +196,38 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(renewed.body.certificateStatus).toBe("ACTIVE");
     expect(renewed.body.lastRenewedAt).toBeTruthy();
     expect("certificateSecret" in renewed.body).toBe(false);
+    const storedAfterRenewal = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: prepared.body.id },
+      select: { privateKeyPem: true, certificateSecret: true, metadata: true },
+    });
+    expect(storedAfterRenewal.privateKeyPem).toMatch(/^enc:v1:/);
+    expect(storedAfterRenewal.certificateSecret).toMatch(/^enc:v1:/);
+    const lifecycleMetadata =
+      storedAfterRenewal.metadata &&
+      typeof storedAfterRenewal.metadata === "object" &&
+      !Array.isArray(storedAfterRenewal.metadata) &&
+      "onboardingLifecycle" in storedAfterRenewal.metadata
+        ? (storedAfterRenewal.metadata as { onboardingLifecycle?: unknown }).onboardingLifecycle
+        : null;
+    const archivedCertificates =
+      lifecycleMetadata &&
+      typeof lifecycleMetadata === "object" &&
+      !Array.isArray(lifecycleMetadata) &&
+      "archivedCertificates" in lifecycleMetadata &&
+      Array.isArray(
+        (lifecycleMetadata as { archivedCertificates?: unknown }).archivedCertificates,
+      )
+        ? ((lifecycleMetadata as { archivedCertificates: unknown[] }).archivedCertificates ?? [])
+        : [];
+    expect(archivedCertificates.length).toBeGreaterThan(0);
+    expect(
+      archivedCertificates.some(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          (entry as { reason?: string }).reason === "RENEWAL_REPLACED",
+      ),
+    ).toBe(true);
 
     const current = await request(app.getHttpServer())
       .get("/v1/compliance/onboarding/current")
@@ -204,6 +278,125 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(actionSet.has("compliance.onboarding.activated")).toBe(true);
     expect(actionSet.has("compliance.onboarding.renewed")).toBe(true);
     expect(actionSet.has("compliance.onboarding.revoked")).toBe(true);
+  });
+
+  it("enforces a single active onboarding device per environment", async () => {
+    const cookies = await signIn("admin@daftar.local");
+    await switchOrg(cookies, "nomad-events");
+    const suffix = Date.now().toString();
+
+    const prepareAndIssue = async (serial: string, commonName: string) => {
+      const prepared = await request(app.getHttpServer())
+        .post("/v1/compliance/onboarding/prepare")
+        .set("Cookie", cookies)
+        .send({
+          deviceSerial: serial,
+          commonName,
+          organizationUnitName: "Riyadh Operations",
+          organizationName: "Nomad Events Arabia Limited",
+          vatNumber: "300123456700003",
+          branchName: "Riyadh HQ",
+          countryCode: "SA",
+          locationAddress: "Olaya Street, Office 402, Riyadh",
+          industry: "Events",
+        })
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/v1/compliance/onboarding/${prepared.body.id}/generate-csr`)
+        .set("Cookie", cookies)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/v1/compliance/onboarding/${prepared.body.id}/request-otp`)
+        .set("Cookie", cookies)
+        .expect(201);
+
+      await request(app.getHttpServer())
+        .post(`/v1/compliance/onboarding/${prepared.body.id}/submit-otp`)
+        .set("Cookie", cookies)
+        .send({ otpCode: "123456" })
+        .expect(201);
+
+      return prepared.body.id as string;
+    };
+
+    const firstId = await prepareAndIssue(
+      `egs-active-first-${suffix}`,
+      `Nomad First Active ${suffix}`,
+    );
+    await request(app.getHttpServer())
+      .post(`/v1/compliance/onboarding/${firstId}/activate`)
+      .set("Cookie", cookies)
+      .expect(201);
+
+    const secondId = await prepareAndIssue(
+      `egs-active-second-${suffix}`,
+      `Nomad Second Active ${suffix}`,
+    );
+    await request(app.getHttpServer())
+      .post(`/v1/compliance/onboarding/${secondId}/activate`)
+      .set("Cookie", cookies)
+      .expect(201);
+
+    const firstAfterSwitch = await request(app.getHttpServer())
+      .get(`/v1/compliance/onboarding/${firstId}`)
+      .set("Cookie", cookies)
+      .expect(200);
+    expect(firstAfterSwitch.body.status).toBe("CERTIFICATE_ISSUED");
+    expect(firstAfterSwitch.body.certificateStatus).toBe("CERTIFICATE_ISSUED");
+
+    const secondAfterSwitch = await request(app.getHttpServer())
+      .get(`/v1/compliance/onboarding/${secondId}`)
+      .set("Cookie", cookies)
+      .expect(200);
+    expect(secondAfterSwitch.body.status).toBe("ACTIVE");
+    expect(secondAfterSwitch.body.certificateStatus).toBe("ACTIVE");
+
+    const eventsOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-events" },
+      select: { id: true },
+    });
+    const activeRecords = await prisma.complianceOnboarding.findMany({
+      where: {
+        organizationId: eventsOrg.id,
+        environment: secondAfterSwitch.body.environment,
+        status: "ACTIVE",
+        certificateStatus: "ACTIVE",
+        revokedAt: null,
+      },
+      select: { id: true },
+    });
+    expect(activeRecords).toHaveLength(1);
+    expect(activeRecords[0]?.id).toBe(secondId);
+
+    const firstStored = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: firstId },
+      select: { metadata: true },
+    });
+    const firstLifecycle =
+      firstStored.metadata &&
+      typeof firstStored.metadata === "object" &&
+      !Array.isArray(firstStored.metadata) &&
+      "onboardingLifecycle" in firstStored.metadata
+        ? (firstStored.metadata as { onboardingLifecycle?: unknown }).onboardingLifecycle
+        : null;
+    const firstArchived =
+      firstLifecycle &&
+      typeof firstLifecycle === "object" &&
+      !Array.isArray(firstLifecycle) &&
+      "archivedCertificates" in firstLifecycle &&
+      Array.isArray((firstLifecycle as { archivedCertificates?: unknown }).archivedCertificates)
+        ? ((firstLifecycle as { archivedCertificates: unknown[] }).archivedCertificates ?? [])
+        : [];
+    expect(
+      firstArchived.some(
+        (entry) =>
+          entry &&
+          typeof entry === "object" &&
+          (entry as { reason?: string }).reason === "DEVICE_SWITCH_DEACTIVATED",
+      ),
+    ).toBe(true);
   });
 
   it("rejects CSR generation when required onboarding identity fields are missing", async () => {
@@ -332,9 +525,20 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     });
     expect(acceptanceEvent).toBeTruthy();
 
+    const refreshedOnboarding = await prisma.complianceOnboarding.findUniqueOrThrow({
+      where: { id: activeOnboarding.id },
+      select: {
+        csid: true,
+        certificateSecret: true,
+      },
+    });
+    expect(refreshedOnboarding.certificateSecret).toBeTruthy();
+    const decryptedCertificateSecret = complianceEncryptionService.decrypt(
+      refreshedOnboarding.certificateSecret ?? "",
+    );
     expect(capturedCredentials).toEqual({
-      clientId: activeOnboarding.csid,
-      clientSecret: activeOnboarding.certificateSecret,
+      clientId: refreshedOnboarding.csid,
+      clientSecret: decryptedCertificateSecret,
     });
     if (!capturedCredentials) {
       throw new Error("Expected onboarding-scoped credentials to be captured.");
@@ -343,8 +547,10 @@ describe.sequential("Daftar staged compliance onboarding", () => {
       clientId: string;
       clientSecret: string;
     };
-    expect(ensuredCredentials.clientId).not.toBe(loadEnv().ZATCA_CLIENT_ID);
-    expect(ensuredCredentials.clientSecret).not.toBe(loadEnv().ZATCA_CLIENT_SECRET);
+    expect(refreshedOnboarding.certificateSecret).not.toBe(
+      ensuredCredentials.clientSecret,
+    );
+    expect(refreshedOnboarding.certificateSecret).toMatch(/^enc:v1:/);
 
     const detail = await request(app.getHttpServer())
       .get(`/v1/sales/invoices/${invoice.body.id}`)
@@ -353,6 +559,33 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(detail.body.compliance.submission.requestId).toBe("REQ-CRED-PROPAGATION");
     expect(detail.body.compliance.submission.warnings).toEqual(["Sandbox warning"]);
     expect(detail.body.compliance.attempts[0].requestId).toBe("REQ-CRED-PROPAGATION");
+    expect(["PASSED", "SKIPPED"]).toContain(
+      detail.body.compliance.localValidation?.status,
+    );
+    expect(detail.body.compliance.localValidationMetadata).toBeTruthy();
+    expect(detail.body.compliance.hashMetadata).toBeTruthy();
+    expect(detail.body.compliance.qrMetadata).toBeTruthy();
+    expect(detail.body.compliance.signatureMetadata).toBeTruthy();
+
+    const storedDocument = await prisma.complianceDocument.findUniqueOrThrow({
+      where: { salesInvoiceId: invoice.body.id },
+      select: {
+        validationStatus: true,
+        validationWarnings: true,
+        validationErrors: true,
+        validationMetadata: true,
+        hashMetadata: true,
+        qrMetadata: true,
+        signatureMetadata: true,
+      },
+    });
+    expect(["PASSED", "SKIPPED"]).toContain(storedDocument.validationStatus);
+    expect(Array.isArray(storedDocument.validationWarnings)).toBe(true);
+    expect(Array.isArray(storedDocument.validationErrors)).toBe(true);
+    expect(storedDocument.validationMetadata).toBeTruthy();
+    expect(storedDocument.hashMetadata).toBeTruthy();
+    expect(storedDocument.qrMetadata).toBeTruthy();
+    expect(storedDocument.signatureMetadata).toBeTruthy();
   });
 
   it("applies stronger retry backoff for throttled submission failures", async () => {
@@ -483,6 +716,105 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(submission.status).toBe("FAILED");
     expect(submission.failureCategory).toBe("AUTHENTICATION");
     expect(submission.nextRetryAt).toBeNull();
+
+    const finalFailureEvent = await prisma.complianceEvent.findFirst({
+      where: {
+        organizationId: eventsOrg.id,
+        zatcaSubmissionId: queued.body.submission.id,
+        action: "compliance.submission.final_failure",
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(finalFailureEvent).toBeTruthy();
+  });
+
+  it("dead-letters exhausted retryable failures after max attempts", async () => {
+    const cookies = await signIn("admin@daftar.local");
+    await switchOrg(cookies, "nomad-events");
+    const eventsOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-events" },
+    });
+    const customer = await prisma.contact.findFirstOrThrow({
+      where: { organizationId: eventsOrg.id, isCustomer: true },
+    });
+    const invoice = await request(app.getHttpServer())
+      .post("/v1/sales/invoices")
+      .set("Cookie", cookies)
+      .send({
+        contactId: customer.id,
+        invoiceNumber: `INV-NE-DLQ-${Date.now()}`,
+        status: "ISSUED",
+        complianceInvoiceKind: "STANDARD",
+        issueDate: "2026-04-19T09:00:00.000Z",
+        dueDate: "2026-04-29T09:00:00.000Z",
+        currencyCode: "SAR",
+        lines: [{ description: "Dead-letter assertion", quantity: "1", unitPrice: "200.00" }],
+      })
+      .expect(201);
+
+    const queued = await request(app.getHttpServer())
+      .post(`/v1/compliance/invoices/${invoice.body.id}/report`)
+      .set("Cookie", cookies)
+      .expect(201);
+    expect(queued.body.status).toBe("QUEUED");
+
+    const seeded = await prisma.zatcaSubmission.findUniqueOrThrow({
+      where: { id: queued.body.submission.id },
+      select: { maxAttempts: true },
+    });
+    await prisma.zatcaSubmission.update({
+      where: { id: queued.body.submission.id },
+      data: {
+        attemptCount: Math.max(seeded.maxAttempts - 1, 0),
+      },
+    });
+
+    let deadLetterSubmissionId: string | null = null;
+    let deadLetterFailureCategory: string | null = null;
+    await processComplianceSubmission({
+      prisma,
+      submissionId: queued.body.submission.id,
+      transport: {
+        endpointFor: () => "test://dead-letter",
+        submit: async (_input: ComplianceTransportRequest) => {
+          throw new ComplianceTransportError({
+            message: "Sandbox gateway timeout after retries.",
+            category: "CONNECTIVITY",
+            retryable: true,
+            statusCode: 503,
+          });
+        },
+      },
+      enqueueRetry: async () => {
+        throw new Error("Retry should not be scheduled after max attempts are exhausted.");
+      },
+      enqueueDeadLetter: async (job) => {
+        deadLetterSubmissionId = job.submissionId;
+        deadLetterFailureCategory = job.failureCategory;
+      },
+    });
+
+    expect(deadLetterSubmissionId).toBe(queued.body.submission.id);
+    expect(deadLetterFailureCategory).toBe("CONNECTIVITY");
+
+    const submission = await prisma.zatcaSubmission.findUniqueOrThrow({
+      where: { id: queued.body.submission.id },
+    });
+    expect(submission.status).toBe("FAILED");
+    expect(submission.retryable).toBe(false);
+    expect(submission.responsePayload).toMatchObject({
+      deadLettered: true,
+    });
+
+    const deadLetterEvent = await prisma.complianceEvent.findFirst({
+      where: {
+        organizationId: eventsOrg.id,
+        zatcaSubmissionId: queued.body.submission.id,
+        action: "compliance.submission.dead_lettered",
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    expect(deadLetterEvent).toBeTruthy();
   });
 
   it("fails queued submissions in the processor path when onboarding is revoked", async () => {

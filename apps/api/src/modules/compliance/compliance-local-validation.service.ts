@@ -1,13 +1,10 @@
 import { Injectable } from "@nestjs/common";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 
 import { loadEnv } from "@daftar/config";
-
-const execFileAsync = promisify(execFile);
+import {
+  SdkParityService,
+  type RuntimeSdkValidationResult,
+} from "./sdk-parity.service";
 
 export type LocalValidationSeverity = "warning" | "error";
 
@@ -35,249 +32,158 @@ export type LocalValidationResult = {
 
 type LocalValidationMode = "required" | "best-effort";
 
-type CommandExecutor = (
-  command: string,
-  args: readonly string[],
-  cwd: string,
-) => Promise<{
-  stdout: string;
-  stderr: string;
-  exitCode: number | null;
-}>;
-
-function parseIssues(stdout: string, stderr: string): LocalValidationIssue[] {
-  const combined = [stdout, stderr].filter(Boolean).join("\n");
-  if (!combined.trim()) {
-    return [];
-  }
-
-  const lines = combined
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const issues: LocalValidationIssue[] = [];
-
-  for (const line of lines) {
-    const normalized = line.toLowerCase();
-    if (normalized.includes("warning")) {
-      issues.push({
-        code: "SDK_WARNING",
-        message: line,
-        severity: "warning",
-      });
-      continue;
-    }
-
-    if (
-      normalized.includes("error") ||
-      normalized.includes("not pass") ||
-      normalized.includes("failed")
-    ) {
-      issues.push({
-        code: "SDK_ERROR",
-        message: line,
-        severity: "error",
-      });
-    }
-  }
-
-  return issues;
-}
-
-function aggregateStatus(commands: LocalValidationCommandResult[]) {
-  if (commands.every((command) => command.status === "SKIPPED")) {
-    return "SKIPPED" as const;
-  }
-
-  if (commands.some((command) => command.status === "FAILED")) {
-    return "FAILED" as const;
-  }
-
-  return "PASSED" as const;
-}
+const validationCommands = ["validate", "generateHash", "qr"] as const;
 
 @Injectable()
 export class ComplianceLocalValidationService {
   private readonly env = loadEnv();
-  private readonly mode: LocalValidationMode;
+  private mode: LocalValidationMode;
 
   constructor(
-    private readonly executor: CommandExecutor = runCommand,
-    mode?: LocalValidationMode,
+    private readonly runner: SdkParityService = new SdkParityService(),
   ) {
     const isVitestRuntime = process.env.VITEST === "true";
-    this.mode = mode
-      ?? (isVitestRuntime ? "best-effort" : this.env.ZATCA_LOCAL_VALIDATION_MODE);
+    this.mode =
+      isVitestRuntime ? "best-effort" : this.env.ZATCA_LOCAL_VALIDATION_MODE;
   }
 
   async validateInvoiceXml(input: {
     invoiceNumber: string;
     xmlContent: string;
   }): Promise<LocalValidationResult> {
-    const workspace = await mkdtemp(join(tmpdir(), "daftar-zatca-sdk-"));
-    const invoiceFile = join(workspace, `${input.invoiceNumber}.xml`);
-
     try {
-      await writeFile(invoiceFile, input.xmlContent, "utf8");
-
-      const command = this.env.ZATCA_SDK_CLI_PATH ?? "fatoora";
-      const commands: Array<{
-        key: "validate" | "generateHash" | "qr";
-        args: string[];
-      }> = [
-        { key: "validate", args: ["-validate", "-invoice", invoiceFile] },
-        { key: "generateHash", args: ["-generateHash", "-invoice", invoiceFile] },
-        { key: "qr", args: ["-qr", "-invoice", invoiceFile] },
-      ];
-
-      const results: LocalValidationCommandResult[] = [];
-      for (const spec of commands) {
-        const result = await this.runSingleCommand({
-          command,
-          args: spec.args,
-          cwd: workspace,
-          mode: spec.key,
-        });
-        results.push(result);
+      const runtimeValidation = await this.runner.runRuntimeValidation(input);
+      const mapped = this.mapRuntimeValidation(runtimeValidation);
+      if (mapped.status === "FAILED" && this.mode === "best-effort") {
+        const downgradeWarning: LocalValidationIssue = {
+          code: "SDK_VALIDATION_SKIPPED",
+          message:
+            "Local SDK validation reported errors, but enforcement is disabled in best-effort mode.",
+          severity: "warning",
+        };
+        return {
+          status: "SKIPPED",
+          commands: mapped.commands.map((command) =>
+            command.status === "FAILED"
+              ? {
+                  ...command,
+                  status: "SKIPPED",
+                  issues: [...command.issues, downgradeWarning],
+                }
+              : command,
+          ),
+          warnings: [...mapped.warnings, downgradeWarning],
+          errors: [],
+        };
       }
-
-      const warnings = results.flatMap((result) =>
-        result.issues.filter((issue) => issue.severity === "warning"),
-      );
-      const errors = results.flatMap((result) =>
-        result.issues.filter((issue) => issue.severity === "error"),
-      );
-
-      return {
-        status: aggregateStatus(results),
-        commands: results,
-        warnings,
-        errors,
-      };
-    } finally {
-      await rm(workspace, { recursive: true, force: true });
-    }
-  }
-
-  private async runSingleCommand(input: {
-    command: string;
-    args: readonly string[];
-    cwd: string;
-    mode: "validate" | "generateHash" | "qr";
-  }): Promise<LocalValidationCommandResult> {
-    try {
-      const result = await this.executor(input.command, input.args, input.cwd);
-      const issues = parseIssues(result.stdout, result.stderr);
-      const hasError = issues.some((issue) => issue.severity === "error");
-
-      return {
-        command: input.mode,
-        status:
-          result.exitCode !== null && result.exitCode !== 0
-            ? "FAILED"
-            : hasError
-              ? "FAILED"
-              : "PASSED",
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-        issues,
-      };
+      return mapped;
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : "Local SDK command failed.";
-      const isMissingTool =
-        message.includes("ENOENT") ||
-        message.toLowerCase().includes("not recognized");
+        error instanceof Error ? error.message : "Local SDK validation failed.";
+      const lowered = message.toLowerCase();
+      const isMissingSdkRuntime =
+        lowered.includes("enoent") ||
+        lowered.includes("not recognized") ||
+        lowered.includes("unable to locate sdk root") ||
+        lowered.includes("sdk jar not found");
 
-      if (isMissingTool && this.mode === "required") {
+      if (isMissingSdkRuntime && this.mode === "best-effort") {
+        const warning: LocalValidationIssue = {
+          code: "SDK_UNAVAILABLE",
+          message:
+            "ZATCA SDK runtime is unavailable locally. Skipping offline validation in best-effort mode.",
+          severity: "warning",
+        };
         return {
-          command: input.mode,
+          status: "SKIPPED",
+          commands: validationCommands.map((command) => ({
+            command,
+            status: "SKIPPED",
+            stdout: "",
+            stderr: message,
+            exitCode: null,
+            issues: [warning],
+          })),
+          warnings: [warning],
+          errors: [],
+        };
+      }
+
+      const failure: LocalValidationIssue = {
+        code: isMissingSdkRuntime ? "SDK_UNAVAILABLE" : "SDK_EXECUTION_ERROR",
+        message: isMissingSdkRuntime
+          ? "ZATCA SDK runtime is required but unavailable. Ensure SDK files and Java runtime are installed."
+          : message,
+        severity: "error",
+      };
+      return {
+        status: "FAILED",
+        commands: validationCommands.map((command) => ({
+          command,
           status: "FAILED",
           stdout: "",
           stderr: message,
           exitCode: null,
-          issues: [
-            {
-              code: "SDK_UNAVAILABLE",
-              message:
-                "ZATCA SDK CLI is required but was not found locally. Install SDK and expose `fatoora` or set ZATCA_SDK_CLI_PATH.",
-              severity: "error",
-            },
-          ],
-        };
-      }
-
-      return {
-        command: input.mode,
-        status: isMissingTool ? "SKIPPED" : "FAILED",
-        stdout: "",
-        stderr: message,
-        exitCode: null,
-        issues: isMissingTool
-          ? [
-              {
-                code: "SDK_UNAVAILABLE",
-                message:
-                  "ZATCA SDK CLI was not found locally. Skipping offline validation.",
-                severity: "warning",
-              },
-            ]
-          : [
-              {
-                code: "SDK_EXECUTION_ERROR",
-                message,
-                severity: "error",
-              },
-            ],
+          issues: [failure],
+        })),
+        warnings: [],
+        errors: [failure],
       };
     }
   }
-}
 
-async function runCommand(command: string, args: readonly string[], cwd: string) {
-  try {
-    const { stdout, stderr } = await execFileAsync(command, args, {
-      cwd,
-      windowsHide: true,
-      timeout: 60_000,
-      maxBuffer: 1024 * 1024 * 8,
-    });
-    return {
-      stdout: String(stdout ?? ""),
-      stderr: String(stderr ?? ""),
-      exitCode: 0,
-    };
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "stdout" in error &&
-      "stderr" in error
-    ) {
-      const err = error as {
-        stdout?: string | Buffer;
-        stderr?: string | Buffer;
-        code?: number;
-      };
+  private mapRuntimeValidation(
+    runtimeValidation: RuntimeSdkValidationResult,
+  ): LocalValidationResult {
+    const commands = runtimeValidation.commands.map<LocalValidationCommandResult>((command) => {
+      const warningIssues = command.warnings.map<LocalValidationIssue>((message) => ({
+        code: "SDK_WARNING",
+        message,
+        severity: "warning",
+      }));
+      const errorIssues = command.errors.map<LocalValidationIssue>((message) => ({
+        code: "SDK_ERROR",
+        message,
+        severity: "error",
+      }));
       return {
-        stdout: Buffer.isBuffer(err.stdout)
-          ? err.stdout.toString("utf8")
-          : String(err.stdout ?? ""),
-        stderr: Buffer.isBuffer(err.stderr)
-          ? err.stderr.toString("utf8")
-          : String(err.stderr ?? ""),
-        exitCode: typeof err.code === "number" ? err.code : null,
+        command: command.command,
+        status: command.status,
+        stdout: command.stdout,
+        stderr: command.stderr,
+        exitCode: command.exitCode,
+        issues: [...warningIssues, ...errorIssues],
       };
-    }
+    });
+    const warnings = runtimeValidation.warnings.map<LocalValidationIssue>((message) => ({
+      code: "SDK_WARNING",
+      message,
+      severity: "warning",
+    }));
+    const errors = runtimeValidation.errors.map<LocalValidationIssue>((message) => ({
+      code: "SDK_ERROR",
+      message,
+      severity: "error",
+    }));
 
-    throw error;
+    return {
+      status: runtimeValidation.status,
+      commands,
+      warnings,
+      errors,
+    };
+  }
+
+  setModeForTests(mode: LocalValidationMode) {
+    this.mode = mode;
   }
 }
 
 export function createLocalValidationServiceForTests(
-  executor: CommandExecutor,
+  runner: Pick<SdkParityService, "runRuntimeValidation">,
   mode: LocalValidationMode = "required",
 ) {
-  return new ComplianceLocalValidationService(executor, mode);
+  const service = new ComplianceLocalValidationService(runner as SdkParityService);
+  service.setModeForTests(mode);
+  return service;
 }

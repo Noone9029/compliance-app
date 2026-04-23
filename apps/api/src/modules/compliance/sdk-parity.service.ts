@@ -49,6 +49,25 @@ type SdkCommandExecution = {
   exitCode: number | null;
 };
 
+export type RuntimeSdkValidationCommandResult = {
+  command: "validate" | "generateHash" | "qr";
+  status: "PASSED" | "FAILED";
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  warnings: string[];
+  errors: string[];
+};
+
+export type RuntimeSdkValidationResult = {
+  status: "PASSED" | "FAILED";
+  hash: string | null;
+  qr: string | null;
+  warnings: string[];
+  errors: string[];
+  commands: RuntimeSdkValidationCommandResult[];
+};
+
 export type SdkParityMismatchArea =
   | "validation"
   | "hash"
@@ -199,6 +218,109 @@ export class SdkParityService {
     }
 
     return lines.join("\n");
+  }
+
+  async runRuntimeValidation(input: {
+    invoiceNumber: string;
+    xmlContent: string;
+  }): Promise<RuntimeSdkValidationResult> {
+    const workspace = await mkdtemp(join(tmpdir(), "daftar-sdk-runtime-validation-"));
+    try {
+      const runtime = await this.prepareSdkRuntime(workspace);
+      const invoicePath = join(workspace, `${input.invoiceNumber}.xml`);
+      await writeFile(invoicePath, input.xmlContent, "utf8");
+
+      const validateExecution = await this.runSdkCommand(
+        runtime,
+        workspace,
+        "validate",
+        ["-validate", "-invoice", invoicePath],
+      );
+      const hashExecution = await this.runSdkCommand(
+        runtime,
+        workspace,
+        "generateHash",
+        ["-generateHash", "-invoice", invoicePath],
+      );
+      const qrExecution = await this.runSdkCommand(runtime, workspace, "qr", [
+        "-qr",
+        "-invoice",
+        invoicePath,
+      ]);
+
+      const parsedValidation = this.parseValidation(validateExecution);
+      const parseCommandMessages = (execution: SdkCommandExecution) => {
+        const lines = `${execution.stdout}\n${execution.stderr}`
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        const warnings = lines.filter(
+          (line) =>
+            line.includes("[WARN]") || line.toLowerCase().startsWith("warning"),
+        );
+        const errors = lines.filter(
+          (line) =>
+            line.includes("[ERROR]") ||
+            line.toLowerCase().startsWith("error") ||
+            line.toLowerCase().includes("failed") ||
+            line.toLowerCase().includes("not pass"),
+        );
+        return { warnings, errors };
+      };
+
+      const hashMessages = parseCommandMessages(hashExecution);
+      const qrMessages = parseCommandMessages(qrExecution);
+      const commandResult = (
+        execution: SdkCommandExecution,
+        warnings: string[],
+        errors: string[],
+      ): RuntimeSdkValidationCommandResult => ({
+        command: execution.command as "validate" | "generateHash" | "qr",
+        status:
+          execution.exitCode !== null && execution.exitCode !== 0
+            ? "FAILED"
+            : errors.length > 0
+              ? "FAILED"
+              : "PASSED",
+        stdout: execution.stdout,
+        stderr: execution.stderr,
+        exitCode: execution.exitCode,
+        warnings,
+        errors,
+      });
+
+      const validateCommand = commandResult(
+        validateExecution,
+        parsedValidation.warnings,
+        parsedValidation.errors,
+      );
+      const hashCommand = commandResult(
+        hashExecution,
+        hashMessages.warnings,
+        hashMessages.errors,
+      );
+      const qrCommand = commandResult(qrExecution, qrMessages.warnings, qrMessages.errors);
+      const commands = [validateCommand, hashCommand, qrCommand];
+      const warnings = commands.flatMap((command) => command.warnings);
+      const errors = commands.flatMap((command) => command.errors);
+      const status = commands.some((command) => command.status === "FAILED")
+        ? "FAILED"
+        : "PASSED";
+
+      return {
+        status,
+        hash: this.parseSingleValue(
+          hashExecution,
+          /INVOICE HASH\s*=\s*([A-Za-z0-9+/=]+)/i,
+        ),
+        qr: this.parseSingleValue(qrExecution, /QR code\s*=\s*([A-Za-z0-9+/=]+)/i),
+        warnings,
+        errors,
+        commands,
+      };
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   }
 
   private async runFixtureParity(input: {

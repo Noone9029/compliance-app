@@ -67,6 +67,18 @@ function extractTransportMessages(payload: Prisma.JsonValue | null | undefined) 
   };
 }
 
+function jsonStringArray(value: Prisma.JsonValue | null | undefined) {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function jsonObject(value: Prisma.JsonValue | null | undefined) {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 @Injectable()
 export class SalesService {
   private readonly prisma: PrismaService;
@@ -287,7 +299,24 @@ export class SalesService {
               invoice.complianceDocument.clearedAt?.toISOString() ?? null,
             reportedAt:
               invoice.complianceDocument.reportedAt?.toISOString() ?? null,
-            localValidation: null,
+            localValidation:
+              invoice.complianceDocument.validationStatus !== null
+                ? {
+                    status: invoice.complianceDocument.validationStatus,
+                    warnings: jsonStringArray(
+                      invoice.complianceDocument.validationWarnings,
+                    ),
+                    errors: jsonStringArray(invoice.complianceDocument.validationErrors),
+                  }
+                : null,
+            localValidationMetadata: jsonObject(
+              invoice.complianceDocument.validationMetadata,
+            ),
+            hashMetadata: jsonObject(invoice.complianceDocument.hashMetadata),
+            qrMetadata: jsonObject(invoice.complianceDocument.qrMetadata),
+            signatureMetadata: jsonObject(
+              invoice.complianceDocument.signatureMetadata,
+            ),
             retryAllowed: Boolean(
               invoice.complianceDocument.submission &&
                 invoice.complianceDocument.submission.attemptCount <

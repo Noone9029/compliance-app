@@ -31,6 +31,19 @@ function statusLabel(value: string | null | undefined) {
     .join(" ");
 }
 
+function presentTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return "Not available";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "Not available";
+  }
+
+  return `${date.toISOString().slice(0, 10)} ${`${date.getHours()}`.padStart(2, "0")}:${`${date.getMinutes()}`.padStart(2, "0")}`;
+}
+
 export function EInvoiceIntegrationPanel(props: {
   canWrite: boolean;
   canManageLifecycle: boolean;
@@ -271,16 +284,11 @@ export function EInvoiceIntegrationPanel(props: {
                   <p>Device Name: {onboarding?.deviceName ?? "Not registered"}</p>
                   <p>CSID: {onboarding?.csid ?? "Not issued"}</p>
                   <p>Certificate ID: {onboarding?.certificateId ?? "Not issued"}</p>
-                  <p>
-                    Certificate Expires:{" "}
-                    {onboarding?.certificateExpiresAt
-                      ? onboarding.certificateExpiresAt.slice(0, 19).replace("T", " ")
-                      : "Unknown"}
-                  </p>
+                  <p>Certificate Expires: {presentTimestamp(onboarding?.certificateExpiresAt)}</p>
                   <p>
                     Integration Date:{" "}
                     {props.integration.integrationDate
-                      ? props.integration.integrationDate.slice(0, 10)
+                      ? presentTimestamp(props.integration.integrationDate)
                       : "Not registered"}
                   </p>
                 </div>
@@ -301,6 +309,24 @@ export function EInvoiceIntegrationPanel(props: {
                 />
               </div>
             </div>
+            {onboarding ? (
+              <div className="mt-4 grid gap-3 rounded-xl border border-slate-200 bg-white p-4 text-sm text-slate-600 md:grid-cols-2">
+                <div className="space-y-1">
+                  <p className="font-medium text-slate-800">Certificate Details</p>
+                  <p>Issued At: {presentTimestamp(onboarding.certificateIssuedAt)}</p>
+                  <p>Activated At: {presentTimestamp(onboarding.lastActivatedAt)}</p>
+                  <p>Renewed At: {presentTimestamp(onboarding.lastRenewedAt)}</p>
+                  <p>Revoked At: {presentTimestamp(onboarding.revokedAt)}</p>
+                </div>
+                <div className="space-y-1">
+                  <p className="font-medium text-slate-800">Credential Posture</p>
+                  <p>CSR Generated: {onboarding.hasCsr ? "Yes" : "No"}</p>
+                  <p>Certificate Issued: {onboarding.hasCertificate ? "Yes" : "No"}</p>
+                  <p>Secret Fingerprint: {onboarding.secretFingerprint ?? "Not available"}</p>
+                  <p>CSR Submitted At: {presentTimestamp(onboarding.csrSubmittedAt)}</p>
+                </div>
+              </div>
+            ) : null}
 
             {onboarding?.lastError ? (
               <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">

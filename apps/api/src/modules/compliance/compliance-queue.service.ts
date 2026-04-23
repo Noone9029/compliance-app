@@ -5,7 +5,10 @@ import type IORedis from "ioredis";
 import {
   createComplianceQueueConnection,
   createComplianceSubmissionQueue,
+  createComplianceDeadLetterQueue,
+  enqueueComplianceDeadLetter,
   enqueueComplianceSubmission,
+  type ComplianceDeadLetterQueueJob,
   type ComplianceQueueJob,
 } from "./compliance-queue";
 
@@ -13,10 +16,12 @@ import {
 export class ComplianceQueueService implements OnModuleDestroy {
   private readonly connection: IORedis;
   private readonly queue: Queue<ComplianceQueueJob>;
+  private readonly deadLetterQueue: Queue<ComplianceDeadLetterQueueJob>;
 
   constructor() {
     this.connection = createComplianceQueueConnection();
     this.queue = createComplianceSubmissionQueue(this.connection);
+    this.deadLetterQueue = createComplianceDeadLetterQueue(this.connection);
   }
 
   async enqueueSubmission(submissionId: string, delayMs = 0) {
@@ -27,8 +32,16 @@ export class ComplianceQueueService implements OnModuleDestroy {
     });
   }
 
+  async enqueueDeadLetter(job: ComplianceDeadLetterQueueJob) {
+    await enqueueComplianceDeadLetter({
+      job,
+      queue: this.deadLetterQueue,
+    });
+  }
+
   async onModuleDestroy() {
     await this.queue.close();
+    await this.deadLetterQueue.close();
     await this.connection.quit();
   }
 }

@@ -30,8 +30,8 @@ function buildEnv(overrides?: Partial<DaftarEnv>): DaftarEnv {
     ZATCA_BASE_URL: "https://example.zatca.gov.sa",
     ZATCA_SDK_CLI_PATH: "fatoora",
     ZATCA_LOCAL_VALIDATION_MODE: "required",
-    ZATCA_CLIENT_ID: "placeholder",
-    ZATCA_CLIENT_SECRET: "placeholder",
+    COMPLIANCE_ENCRYPTION_KEY: "compliance-encryption-local-dev-key",
+    COMPLIANCE_ENCRYPTION_PREVIOUS_KEYS: "",
     S3_ENDPOINT: "http://localhost:9000",
     S3_REGION: "us-east-1",
     S3_BUCKET: "daftar-local",
@@ -355,6 +355,80 @@ describe("compliance transport", () => {
       category: "CONNECTIVITY",
       retryable: true,
       statusCode: 429,
+    });
+  });
+
+  it("treats 5xx responses as retryable connectivity failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      headers: {
+        get: vi.fn().mockReturnValue(null),
+      },
+      json: async () => ({
+        message: "Service unavailable",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createComplianceTransportClient({ env: buildEnv() });
+
+    await expect(
+      client.submit({
+        flow: "REPORTING",
+        invoiceId: "invoice_503",
+        invoiceNumber: "INV-NE-503",
+        uuid: "uuid-503",
+        attemptNumber: 1,
+        invoiceHash: "hash-503",
+        xmlContent: "<Invoice />",
+        onboarding: null,
+        credentials: {
+          clientId: "tenant-client",
+          clientSecret: "tenant-secret",
+        },
+      }),
+    ).rejects.toMatchObject({
+      category: "CONNECTIVITY",
+      retryable: true,
+      statusCode: 503,
+    });
+  });
+
+  it("treats authentication responses as terminal failures", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      headers: {
+        get: vi.fn().mockReturnValue(null),
+      },
+      json: async () => ({
+        message: "Unauthorized",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createComplianceTransportClient({ env: buildEnv() });
+
+    await expect(
+      client.submit({
+        flow: "CLEARANCE",
+        invoiceId: "invoice_401",
+        invoiceNumber: "INV-NE-401",
+        uuid: "uuid-401",
+        attemptNumber: 1,
+        invoiceHash: "hash-401",
+        xmlContent: "<Invoice />",
+        onboarding: null,
+        credentials: {
+          clientId: "tenant-client",
+          clientSecret: "tenant-secret",
+        },
+      }),
+    ).rejects.toMatchObject({
+      category: "AUTHENTICATION",
+      retryable: false,
+      statusCode: 401,
     });
   });
 

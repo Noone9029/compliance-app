@@ -6,6 +6,7 @@ import {
 } from "@nestjs/common";
 import type {
   ComplianceDocumentRecord,
+  ComplianceMonitorInvoiceRecord,
   ComplianceOnboardingRecord,
   ComplianceOverviewRecord,
   ComplianceSubmissionAttemptRecord,
@@ -33,6 +34,7 @@ import {
   ComplianceOnboardingClientError,
 } from "./compliance-onboarding.client";
 import { ComplianceCryptoService } from "./compliance-crypto.service";
+import { ComplianceEncryptionService } from "./encryption.service";
 import { ComplianceLocalValidationService } from "./compliance-local-validation.service";
 import { ComplianceQueueService } from "./compliance-queue.service";
 import { fingerprintSecret } from "./compliance-transport";
@@ -45,6 +47,32 @@ const paymentMeansOptions = [
   { code: "48", label: "Bank Card" },
   { code: "49", label: "Direct Debit" },
 ] as const;
+
+const complianceDocumentWithRelationsInclude = {
+  salesInvoice: true,
+  submission: {
+    include: {
+      attempts: {
+        orderBy: { startedAt: "desc" },
+      },
+    },
+  },
+  events: {
+    orderBy: { createdAt: "desc" },
+  },
+} as const satisfies Prisma.ComplianceDocumentInclude;
+
+type ComplianceDocumentWithRelations = Prisma.ComplianceDocumentGetPayload<{
+  include: {
+    salesInvoice: true;
+    submission: {
+      include: {
+        attempts: true;
+      };
+    };
+    events: true;
+  };
+}>;
 
 type PrepareOnboardingInput = {
   deviceSerial: string;
@@ -64,6 +92,15 @@ type RenewOnboardingInput = {
 
 type RevokeOnboardingInput = {
   reason?: string;
+};
+
+type CredentialSnapshot = {
+  csid: string | null;
+  certificateId: string | null;
+  secretFingerprint: string | null;
+  certificateIssuedAt: string | null;
+  certificateExpiresAt: string | null;
+  revokedAt: string | null;
 };
 
 type IntegrationConfig = {
@@ -373,6 +410,8 @@ export class ComplianceService {
     private readonly complianceQueueService: ComplianceQueueService,
     @Inject(ComplianceCryptoService)
     private readonly complianceCryptoService: ComplianceCryptoService,
+    @Inject(ComplianceEncryptionService)
+    private readonly complianceEncryptionService: ComplianceEncryptionService,
     @Inject(ComplianceLocalValidationService)
     private readonly complianceLocalValidationService: ComplianceLocalValidationService,
     @Inject(ComplianceOnboardingClient)
@@ -448,6 +487,27 @@ export class ComplianceService {
     });
 
     return documents.map(reportedDocumentRecord);
+  }
+
+  async listComplianceDocuments(
+    organizationId: string,
+  ): Promise<ComplianceMonitorInvoiceRecord[]> {
+    const documents = await this.prisma.complianceDocument.findMany({
+      where: { organizationId },
+      orderBy: [{ updatedAt: "desc" }],
+      include: complianceDocumentWithRelationsInclude,
+    });
+
+    return documents.map((document) => ({
+      salesInvoiceId: document.salesInvoiceId,
+      invoiceNumber: document.salesInvoice.invoiceNumber,
+      invoiceStatus: document.salesInvoice.status,
+      issueDate: document.salesInvoice.issueDate.toISOString(),
+      dueDate: document.salesInvoice.dueDate.toISOString(),
+      currencyCode: document.salesInvoice.currencyCode,
+      total: document.salesInvoice.total.toString(),
+      compliance: this.complianceDocumentRecord(document),
+    }));
   }
 
   async getIntegration(organizationId: string): Promise<EInvoiceIntegrationRecord> {
@@ -702,7 +762,7 @@ export class ComplianceService {
       data: {
         status: "CSR_GENERATED",
         certificateStatus: "CSR_GENERATED",
-        privateKeyPem: generated.privateKeyPem,
+        privateKeyPem: this.complianceEncryptionService.encrypt(generated.privateKeyPem),
         publicKeyPem: generated.publicKeyPem,
         csrPem: generated.csrPem,
         csrBase64: generated.csrBase64,
@@ -828,7 +888,7 @@ export class ComplianceService {
           certificateId: issued.certificateId,
           certificatePem: issued.certificatePem,
           certificateBase64: issued.certificateBase64,
-          certificateSecret: issued.secret,
+          certificateSecret: this.complianceEncryptionService.encrypt(issued.secret),
           secretFingerprint: fingerprintSecret(issued.secret),
           certificateIssuedAt: issued.issuedAt ?? now,
           certificateExpiresAt: issued.expiresAt,
@@ -840,7 +900,7 @@ export class ComplianceService {
               stage: "COMPLIANCE_CERTIFICATE_ISSUED",
               complianceRequestId: issued.requestId,
               complianceDisposition: issued.dispositionMessage,
-              complianceResponse: issued.rawPayload,
+              complianceResponse: this.sanitizeOnboardingMetadata(issued.rawPayload),
             },
           }),
         },
@@ -928,6 +988,25 @@ export class ComplianceService {
         "Private key material is required before production activation.",
       );
     }
+    const certificateSecret = await this.readOnboardingSecret({
+      onboardingId: onboarding.id,
+      field: "certificateSecret",
+      value: onboarding.certificateSecret,
+      errorMessage:
+        "Compliance onboarding secret cannot be decrypted. Verify encryption key configuration.",
+    });
+    const privateKeyPem = await this.readOnboardingSecret({
+      onboardingId: onboarding.id,
+      field: "privateKeyPem",
+      value: onboarding.privateKeyPem,
+      errorMessage:
+        "Onboarding private key cannot be decrypted. Verify encryption key configuration.",
+    });
+    if (!certificateSecret || !privateKeyPem) {
+      throw new BadRequestException(
+        "Compliance credentials are required before production activation.",
+      );
+    }
 
     const csr = onboarding.csrPem ?? onboarding.csrBase64!;
     const priorCredential = this.credentialSnapshot(onboarding);
@@ -937,22 +1016,48 @@ export class ComplianceService {
       complianceCheckResult = await this.runOnboardingComplianceCheck({
         onboarding,
         organizationId,
-        privateKeyPem: onboarding.privateKeyPem,
+        privateKeyPem,
         certificatePem:
           onboarding.certificatePem ??
           this.certificatePemFromBase64(onboarding.certificateBase64),
         credentials: {
           csid: onboarding.csid,
-          secret: onboarding.certificateSecret,
+          secret: certificateSecret,
         },
       });
       if (!complianceCheckResult.passed) {
+        await this.prisma.complianceEvent.create({
+          data: {
+            organizationId,
+            complianceOnboardingId: onboarding.id,
+            action: "compliance.onboarding.compliance_check_failed",
+            status: "FAILED",
+            message:
+              complianceCheckResult.errors[0] ??
+              "Sandbox compliance-check failed before production activation.",
+            metadata: this.sanitizeOnboardingMetadata(
+              complianceCheckResult.rawPayload,
+            ) as Prisma.InputJsonValue,
+          },
+        });
         throw new BadRequestException(
           `Sandbox compliance-check failed before production activation. ${
             complianceCheckResult.errors[0] ?? "No error details returned."
           }`,
         );
       }
+      await this.prisma.complianceEvent.create({
+        data: {
+          organizationId,
+          complianceOnboardingId: onboarding.id,
+          action: "compliance.onboarding.compliance_check_passed",
+          status: "PASSED",
+          message: "Sandbox compliance-check passed before production activation.",
+          metadata: this.sanitizeOnboardingMetadata(
+            complianceCheckResult.rawPayload,
+          ) as Prisma.InputJsonValue,
+        },
+      });
 
       const activated = await this.complianceOnboardingClient.activateProductionCsid({
         csr,
@@ -960,47 +1065,108 @@ export class ComplianceService {
         environment: onboarding.environment,
         complianceCredentials: {
           csid: onboarding.csid,
-          secret: onboarding.certificateSecret,
+          secret: certificateSecret,
         },
       });
       const now = new Date();
-      const updated = await this.prisma.complianceOnboarding.update({
-        where: { id: onboarding.id },
-        data: {
-          status: "ACTIVE",
-          certificateStatus: "ACTIVE",
-          csid: activated.csid,
-          certificateId: activated.certificateId,
-          certificatePem: activated.certificatePem,
-          certificateBase64: activated.certificateBase64,
-          certificateSecret: activated.secret,
-          secretFingerprint: fingerprintSecret(activated.secret),
-          certificateIssuedAt: activated.issuedAt ?? now,
-          certificateExpiresAt: activated.expiresAt,
-          lastActivatedAt: now,
-          revokedAt: null,
-          lastError: null,
-          metadata: this.mergeOnboardingMetadata(onboarding.metadata, {
-            onboardingLifecycle: {
-              stage: "PRODUCTION_ACTIVE",
-              activatedAt: now.toISOString(),
-              complianceCheck: complianceCheckResult,
-              activationResponse: activated.rawPayload,
-              previousCredential: priorCredential,
-            },
-          }),
-        },
-      });
+      const { updated } = await this.prisma.$transaction(async (tx) => {
+        const conflictingActive = await tx.complianceOnboarding.findMany({
+          where: {
+            organizationId,
+            environment: onboarding.environment,
+            id: { not: onboarding.id },
+            status: "ACTIVE",
+            certificateStatus: "ACTIVE",
+            revokedAt: null,
+          },
+          orderBy: { updatedAt: "desc" },
+        });
 
-      await this.prisma.complianceEvent.create({
-        data: {
-          organizationId,
-          complianceOnboardingId: updated.id,
-          action: "compliance.onboarding.activated",
-          status: updated.status,
-          message:
-            "Production credential activated and now used for invoice submission.",
-        },
+        for (const conflict of conflictingActive) {
+          const conflictSnapshot = this.credentialSnapshot(conflict);
+          await tx.complianceOnboarding.update({
+            where: { id: conflict.id },
+            data: {
+              status: "CERTIFICATE_ISSUED",
+              certificateStatus: "CERTIFICATE_ISSUED",
+              lastError: null,
+              metadata: this.lifecycleMetadata({
+                existing: conflict.metadata,
+                patch: {
+                  stage: "DEACTIVATED_BY_DEVICE_SWITCH",
+                  deactivatedAt: now.toISOString(),
+                  deactivatedReason:
+                    "Another device was activated for this environment.",
+                  activeOnboardingId: onboarding.id,
+                },
+                archiveCredential: {
+                  snapshot: conflictSnapshot,
+                  reason: "DEVICE_SWITCH_DEACTIVATED",
+                  archivedAt: now.toISOString(),
+                  replacedByOnboardingId: onboarding.id,
+                },
+              }),
+            },
+          });
+
+          await tx.complianceEvent.create({
+            data: {
+              organizationId,
+              complianceOnboardingId: conflict.id,
+              action: "compliance.onboarding.deactivated",
+              status: "CERTIFICATE_ISSUED",
+              message:
+                "Device deactivated because another onboarding device was activated for the same environment.",
+            },
+          });
+        }
+
+        const next = await tx.complianceOnboarding.update({
+          where: { id: onboarding.id },
+          data: {
+            status: "ACTIVE",
+            certificateStatus: "ACTIVE",
+            csid: activated.csid,
+            certificateId: activated.certificateId,
+            certificatePem: activated.certificatePem,
+            certificateBase64: activated.certificateBase64,
+            certificateSecret: this.complianceEncryptionService.encrypt(activated.secret),
+            secretFingerprint: fingerprintSecret(activated.secret),
+            certificateIssuedAt: activated.issuedAt ?? now,
+            certificateExpiresAt: activated.expiresAt,
+            lastActivatedAt: now,
+            revokedAt: null,
+            lastError: null,
+            metadata: this.lifecycleMetadata({
+              existing: onboarding.metadata,
+              patch: {
+                stage: "PRODUCTION_ACTIVE",
+                activatedAt: now.toISOString(),
+                complianceCheck: complianceCheckResult,
+                activationResponse: this.sanitizeOnboardingMetadata(activated.rawPayload),
+                previousCredential: priorCredential,
+              },
+              archiveCredential: {
+                snapshot: priorCredential,
+                reason: "PRODUCTION_ACTIVATION_REPLACED",
+                archivedAt: now.toISOString(),
+              },
+            }),
+          },
+        });
+
+        await tx.complianceEvent.create({
+          data: {
+            organizationId,
+            complianceOnboardingId: next.id,
+            action: "compliance.onboarding.activated",
+            status: next.status,
+            message:
+              "Production credential activated and now used for invoice submission.",
+          },
+        });
+
+        return { updated: next };
       });
 
       return onboardingRecord(updated);
@@ -1074,6 +1240,18 @@ export class ComplianceService {
         "Active credential material is required before renewal.",
       );
     }
+    const certificateSecret = await this.readOnboardingSecret({
+      onboardingId: onboarding.id,
+      field: "certificateSecret",
+      value: onboarding.certificateSecret,
+      errorMessage:
+        "Compliance onboarding secret cannot be decrypted. Verify encryption key configuration.",
+    });
+    if (!certificateSecret) {
+      throw new BadRequestException(
+        "Active credential material is required before renewal.",
+      );
+    }
 
     const generated = await this.complianceCryptoService.generateCsr({
       commonName: onboarding.commonName!,
@@ -1093,7 +1271,7 @@ export class ComplianceService {
         environment: onboarding.environment,
         currentCredentials: {
           csid: onboarding.csid,
-          secret: onboarding.certificateSecret,
+          secret: certificateSecret,
         },
       });
 
@@ -1102,7 +1280,7 @@ export class ComplianceService {
         data: {
           status: "ACTIVE",
           certificateStatus: "ACTIVE",
-          privateKeyPem: generated.privateKeyPem,
+          privateKeyPem: this.complianceEncryptionService.encrypt(generated.privateKeyPem),
           publicKeyPem: generated.publicKeyPem,
           csrPem: generated.csrPem,
           csrBase64: generated.csrBase64,
@@ -1114,7 +1292,7 @@ export class ComplianceService {
           certificateId: renewed.certificateId,
           certificatePem: renewed.certificatePem,
           certificateBase64: renewed.certificateBase64,
-          certificateSecret: renewed.secret,
+          certificateSecret: this.complianceEncryptionService.encrypt(renewed.secret),
           secretFingerprint: fingerprintSecret(renewed.secret),
           certificateIssuedAt: renewed.issuedAt ?? now,
           certificateExpiresAt: renewed.expiresAt,
@@ -1122,12 +1300,18 @@ export class ComplianceService {
           lastRenewedAt: now,
           lastError: null,
           revokedAt: null,
-          metadata: this.mergeOnboardingMetadata(onboarding.metadata, {
-            onboardingLifecycle: {
+          metadata: this.lifecycleMetadata({
+            existing: onboarding.metadata,
+            patch: {
               stage: "PRODUCTION_RENEWED",
               renewedAt: now.toISOString(),
-              renewalResponse: renewed.rawPayload,
+              renewalResponse: this.sanitizeOnboardingMetadata(renewed.rawPayload),
               replacedCredential: priorCredential,
+            },
+            archiveCredential: {
+              snapshot: priorCredential,
+              reason: "RENEWAL_REPLACED",
+              archivedAt: now.toISOString(),
             },
           }),
         },
@@ -1195,13 +1379,25 @@ export class ComplianceService {
         "Credential material is required before revocation.",
       );
     }
+    const certificateSecret = await this.readOnboardingSecret({
+      onboardingId: onboarding.id,
+      field: "certificateSecret",
+      value: onboarding.certificateSecret,
+      errorMessage:
+        "Compliance onboarding secret cannot be decrypted. Verify encryption key configuration.",
+    });
+    if (!certificateSecret) {
+      throw new BadRequestException(
+        "Credential material is required before revocation.",
+      );
+    }
 
     try {
       const revokeResult = await this.complianceOnboardingClient.revokeProductionCsid({
         environment: onboarding.environment,
         currentCredentials: {
           csid: onboarding.csid,
-          secret: onboarding.certificateSecret,
+          secret: certificateSecret,
         },
         reason: input.reason,
       });
@@ -1219,7 +1415,7 @@ export class ComplianceService {
               stage: "PRODUCTION_REVOKED",
               revokedAt: revokedAt.toISOString(),
               reason: input.reason ?? null,
-              revokeResponse: revokeResult,
+              revokeResponse: this.sanitizeOnboardingMetadata(revokeResult),
             },
           }),
         },
@@ -1760,6 +1956,18 @@ export class ComplianceService {
         "Active onboarding does not include signing key and certificate material.",
       );
     }
+    const privateKeyPem = await this.readOnboardingSecret({
+      onboardingId: activeOnboarding.id,
+      field: "privateKeyPem",
+      value: activeOnboarding.privateKeyPem,
+      errorMessage:
+        "Active onboarding private key cannot be decrypted. Verify encryption key configuration.",
+    });
+    if (!privateKeyPem) {
+      throw new BadRequestException(
+        "Active onboarding does not include signing key and certificate material.",
+      );
+    }
 
     const provisionalQrPayload = buildQrPayload({
       sellerName: organizationTaxDetail.legalName,
@@ -1823,7 +2031,7 @@ export class ComplianceService {
     });
     const signing = await this.complianceCryptoService.signPhase2Invoice({
       xmlContent: unsignedInvoiceXml,
-      privateKeyPem: activeOnboarding.privateKeyPem,
+      privateKeyPem,
       certificatePem,
     });
     const qrPayload = buildQrPayload({
@@ -1901,30 +2109,118 @@ export class ComplianceService {
         invoiceNumber: invoice.invoiceNumber,
         xmlContent,
       });
+    const validationWarnings = localValidation.warnings.map((entry) => entry.message);
+    const validationErrors = localValidation.errors.map((entry) => entry.message);
+    const validationMetadata = {
+      commands: localValidation.commands.map((command) => ({
+        command: command.command,
+        status: command.status,
+        exitCode: command.exitCode,
+        warnings: command.issues
+          .filter((issue) => issue.severity === "warning")
+          .map((issue) => issue.message),
+        errors: command.issues
+          .filter((issue) => issue.severity === "error")
+          .map((issue) => issue.message),
+      })),
+    } as const;
+    const hashMetadata = {
+      algorithm: "SHA-256",
+      previousHash,
+      currentHash: signing.invoiceHash,
+      invoiceCounter,
+      uuid,
+    } as const;
+    const qrMetadata = {
+      payloadBase64Length: qrPayload.length,
+      includesTechnicalStamp: invoice.complianceInvoiceKind === "SIMPLIFIED",
+      generatedAt: new Date().toISOString(),
+    } as const;
+    const signatureMetadata = {
+      signingTime: signing.signingTimeIso,
+      signedPropertiesHash: signing.signedPropertiesHash,
+      certificateDigest: signing.certificateDigest,
+      xmlSignatureLength: signing.xmlSignature.length,
+      publicKeyLength: signing.publicKey.length,
+      technicalStampLength: signing.technicalStamp?.length ?? 0,
+    } as const;
     const localValidationSummary = {
       status: localValidation.status,
-      warnings: localValidation.warnings.map((entry) => entry.message),
-      errors: localValidation.errors.map((entry) => entry.message),
+      warnings: validationWarnings,
+      errors: validationErrors,
     } as const;
     if (localValidation.status === "FAILED") {
+      const validationFailureMessage =
+        `Local ZATCA SDK validation failed before submission. ${localValidationSummary.errors
+          .map((entry) => entry)
+          .join(" | ")}`;
+      const failureDocument = await this.prisma.complianceDocument.upsert({
+        where: { salesInvoiceId: invoiceId },
+        update: {
+          onboardingId: activeOnboarding.id,
+          invoiceKind: invoice.complianceInvoiceKind,
+          submissionFlow,
+          invoiceCounter,
+          uuid,
+          qrPayload,
+          previousHash,
+          currentHash: signing.invoiceHash,
+          xmlContent,
+          status: "READY",
+          lastError: validationFailureMessage,
+          failureCategory: "VALIDATION",
+          externalSubmissionId: null,
+          validationStatus: localValidationSummary.status,
+          validationWarnings: validationWarnings as unknown as Prisma.InputJsonValue,
+          validationErrors: validationErrors as unknown as Prisma.InputJsonValue,
+          validationMetadata: validationMetadata as unknown as Prisma.InputJsonValue,
+          validationRanAt: new Date(),
+          hashMetadata: hashMetadata as unknown as Prisma.InputJsonValue,
+          qrMetadata: qrMetadata as unknown as Prisma.InputJsonValue,
+          signatureMetadata: signatureMetadata as unknown as Prisma.InputJsonValue,
+        },
+        create: {
+          organizationId,
+          salesInvoiceId: invoiceId,
+          onboardingId: activeOnboarding.id,
+          invoiceKind: invoice.complianceInvoiceKind,
+          submissionFlow,
+          invoiceCounter,
+          uuid,
+          qrPayload,
+          previousHash,
+          currentHash: signing.invoiceHash,
+          xmlContent,
+          status: "READY",
+          lastError: validationFailureMessage,
+          failureCategory: "VALIDATION",
+          validationStatus: localValidationSummary.status,
+          validationWarnings: validationWarnings as unknown as Prisma.InputJsonValue,
+          validationErrors: validationErrors as unknown as Prisma.InputJsonValue,
+          validationMetadata: validationMetadata as unknown as Prisma.InputJsonValue,
+          validationRanAt: new Date(),
+          hashMetadata: hashMetadata as unknown as Prisma.InputJsonValue,
+          qrMetadata: qrMetadata as unknown as Prisma.InputJsonValue,
+          signatureMetadata: signatureMetadata as unknown as Prisma.InputJsonValue,
+        },
+      });
       await this.prisma.complianceEvent.create({
         data: {
           organizationId,
           salesInvoiceId: invoiceId,
-          complianceDocumentId: invoice.complianceDocument?.id ?? null,
+          complianceDocumentId: failureDocument.id,
           complianceOnboardingId: activeOnboarding.id,
           actorUserId: userId,
           action: "compliance.validation.failed",
           status: "FAILED",
           message: "Local ZATCA SDK validation failed before submission queueing.",
-          metadata: localValidationSummary as Prisma.InputJsonValue,
+          metadata: {
+            ...localValidationSummary,
+            ...validationMetadata,
+          } as Prisma.InputJsonValue,
         },
       });
-      throw new BadRequestException(
-        `Local ZATCA SDK validation failed before submission. ${localValidationSummary.errors
-          .map((entry) => entry)
-          .join(" | ")}`,
-      );
+      throw new BadRequestException(validationFailureMessage);
     }
 
     const now = new Date();
@@ -1948,6 +2244,14 @@ export class ComplianceService {
           lastError: null,
           failureCategory: null,
           externalSubmissionId: null,
+          validationStatus: localValidationSummary.status,
+          validationWarnings: validationWarnings as unknown as Prisma.InputJsonValue,
+          validationErrors: validationErrors as unknown as Prisma.InputJsonValue,
+          validationMetadata: validationMetadata as unknown as Prisma.InputJsonValue,
+          validationRanAt: now,
+          hashMetadata: hashMetadata as unknown as Prisma.InputJsonValue,
+          qrMetadata: qrMetadata as unknown as Prisma.InputJsonValue,
+          signatureMetadata: signatureMetadata as unknown as Prisma.InputJsonValue,
         },
         create: {
           organizationId,
@@ -1964,6 +2268,14 @@ export class ComplianceService {
           status: "QUEUED",
           lastSubmissionStatus: "QUEUED",
           lastSubmittedAt: now,
+          validationStatus: localValidationSummary.status,
+          validationWarnings: validationWarnings as unknown as Prisma.InputJsonValue,
+          validationErrors: validationErrors as unknown as Prisma.InputJsonValue,
+          validationMetadata: validationMetadata as unknown as Prisma.InputJsonValue,
+          validationRanAt: now,
+          hashMetadata: hashMetadata as unknown as Prisma.InputJsonValue,
+          qrMetadata: qrMetadata as unknown as Prisma.InputJsonValue,
+          signatureMetadata: signatureMetadata as unknown as Prisma.InputJsonValue,
         },
       });
       const submission = await tx.zatcaSubmission.upsert({
@@ -2191,26 +2503,39 @@ export class ComplianceService {
   ): Promise<ComplianceDocumentRecord> {
     const document = await this.prisma.complianceDocument.findFirst({
       where: { organizationId, salesInvoiceId: invoiceId },
-      include: {
-        salesInvoice: true,
-        submission: {
-          include: {
-            attempts: {
-              orderBy: { startedAt: "desc" },
-            },
-          },
-        },
-        events: {
-          orderBy: { createdAt: "desc" },
-        },
-      },
+      include: complianceDocumentWithRelationsInclude,
     });
 
     if (!document) {
       throw new NotFoundException("Compliance document not found.");
     }
 
-    const localValidation =
+    return this.complianceDocumentRecord(document);
+  }
+
+  private complianceDocumentRecord(
+    document: ComplianceDocumentWithRelations,
+  ): ComplianceDocumentRecord {
+    const jsonStringArray = (value: Prisma.JsonValue | null | undefined) =>
+      Array.isArray(value)
+        ? value.filter((entry): entry is string => typeof entry === "string")
+        : [];
+    const jsonObject = (
+      value: Prisma.JsonValue | null | undefined,
+    ): Record<string, unknown> | null =>
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+
+    const localValidationFromDocument =
+      document.validationStatus !== null
+        ? {
+            status: document.validationStatus,
+            warnings: jsonStringArray(document.validationWarnings),
+            errors: jsonStringArray(document.validationErrors),
+          }
+        : null;
+    const localValidationFromSubmission =
       document.submission?.requestPayload &&
       typeof document.submission.requestPayload === "object" &&
       !Array.isArray(document.submission.requestPayload) &&
@@ -2223,6 +2548,8 @@ export class ComplianceService {
             };
           }).localValidation ?? null)
         : null;
+    const localValidation =
+      localValidationFromDocument ?? localValidationFromSubmission;
 
     return {
       id: document.id,
@@ -2263,6 +2590,10 @@ export class ComplianceService {
               : [],
           }
         : null,
+      localValidationMetadata: jsonObject(document.validationMetadata),
+      hashMetadata: jsonObject(document.hashMetadata),
+      qrMetadata: jsonObject(document.qrMetadata),
+      signatureMetadata: jsonObject(document.signatureMetadata),
       retryAllowed: Boolean(
         document.submission &&
           document.submission.attemptCount < document.submission.maxAttempts &&
@@ -2283,6 +2614,70 @@ export class ComplianceService {
     };
   }
 
+  private async readOnboardingSecret(input: {
+    onboardingId: string;
+    field: "privateKeyPem" | "certificateSecret";
+    value: string | null;
+    errorMessage: string;
+  }) {
+    if (!input.value) {
+      return null;
+    }
+
+    try {
+      const decrypted = this.complianceEncryptionService.decrypt(input.value);
+      const rotated =
+        this.complianceEncryptionService.reencryptWithCurrentKey(input.value);
+      if (rotated !== input.value) {
+        await this.prisma.complianceOnboarding.update({
+          where: { id: input.onboardingId },
+          data: {
+            [input.field]: rotated,
+          } as Prisma.ComplianceOnboardingUpdateInput,
+        });
+      }
+      return decrypted;
+    } catch {
+      throw new BadRequestException(input.errorMessage);
+    }
+  }
+
+  private sanitizeOnboardingMetadata(
+    value: Record<string, unknown> | null | undefined,
+  ): Record<string, unknown> | null {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+
+    const sensitive = new Set([
+      "secret",
+      "certificateSecret",
+      "privateKeyPem",
+      "privateKey",
+      "private_key",
+    ]);
+    const sanitize = (node: unknown): unknown => {
+      if (Array.isArray(node)) {
+        return node.map((entry) => sanitize(entry));
+      }
+      if (node && typeof node === "object") {
+        return Object.entries(node as Record<string, unknown>).reduce<
+          Record<string, unknown>
+        >((accumulator, [key, entry]) => {
+          if (sensitive.has(key)) {
+            accumulator[key] = "[REDACTED]";
+            return accumulator;
+          }
+          accumulator[key] = sanitize(entry);
+          return accumulator;
+        }, {});
+      }
+      return node;
+    };
+
+    return sanitize(value) as Record<string, unknown>;
+  }
+
   private mergeOnboardingMetadata(
     existing: Prisma.JsonValue | null,
     patch: Record<string, unknown>,
@@ -2294,11 +2689,56 @@ export class ComplianceService {
     } as Prisma.InputJsonValue;
   }
 
+  private lifecycleMetadata(input: {
+    existing: Prisma.JsonValue | null | undefined;
+    patch: Record<string, unknown>;
+    archiveCredential?: {
+      snapshot: CredentialSnapshot;
+      reason: string;
+      archivedAt: string;
+      replacedByOnboardingId?: string | null;
+    };
+  }): Prisma.InputJsonValue {
+    const base = this.metadataObject(input.existing);
+    const lifecycle = this.onboardingLifecycleObject(input.existing);
+    const nextLifecycle = {
+      ...lifecycle,
+      ...input.patch,
+    } as Record<string, unknown>;
+
+    if (input.archiveCredential) {
+      const existingArchive = Array.isArray(lifecycle.archivedCertificates)
+        ? [...lifecycle.archivedCertificates]
+        : [];
+      existingArchive.push({
+        ...input.archiveCredential.snapshot,
+        reason: input.archiveCredential.reason,
+        archivedAt: input.archiveCredential.archivedAt,
+        replacedByOnboardingId: input.archiveCredential.replacedByOnboardingId ?? null,
+      });
+      nextLifecycle.archivedCertificates = existingArchive;
+    }
+
+    return {
+      ...base,
+      onboardingLifecycle: nextLifecycle,
+    } as Prisma.InputJsonValue;
+  }
+
   private metadataObject(value: Prisma.JsonValue | null | undefined) {
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return {} as Record<string, unknown>;
     }
     return value as Record<string, unknown>;
+  }
+
+  private onboardingLifecycleObject(value: Prisma.JsonValue | null | undefined) {
+    const base = this.metadataObject(value);
+    const lifecycle = base.onboardingLifecycle;
+    if (!lifecycle || typeof lifecycle !== "object" || Array.isArray(lifecycle)) {
+      return {} as Record<string, unknown>;
+    }
+    return lifecycle as Record<string, unknown>;
   }
 
   private onboardingClientErrorMessage(error: unknown, fallback: string) {
@@ -2318,7 +2758,7 @@ export class ComplianceService {
     certificateIssuedAt: Date | null;
     certificateExpiresAt: Date | null;
     revokedAt: Date | null;
-  }) {
+  }): CredentialSnapshot {
     return {
       csid: record.csid,
       certificateId: record.certificateId,

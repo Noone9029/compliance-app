@@ -710,6 +710,10 @@ export type ComplianceDocumentRecord = {
     warnings: string[];
     errors: string[];
   } | null;
+  localValidationMetadata: Record<string, unknown> | null;
+  hashMetadata: Record<string, unknown> | null;
+  qrMetadata: Record<string, unknown> | null;
+  signatureMetadata: Record<string, unknown> | null;
   retryAllowed: boolean;
   canShareWithCustomer: boolean;
   submission: ComplianceSubmissionRecord | null;
@@ -717,6 +721,17 @@ export type ComplianceDocumentRecord = {
   timeline: ComplianceTimelineRecord[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type ComplianceMonitorInvoiceRecord = {
+  salesInvoiceId: string;
+  invoiceNumber: string;
+  invoiceStatus: SalesInvoiceStatus;
+  issueDate: string;
+  dueDate: string;
+  currencyCode: string;
+  total: string;
+  compliance: ComplianceDocumentRecord;
 };
 
 export type ReportedDocumentRecord = {

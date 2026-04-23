@@ -82,6 +82,14 @@ export class ComplianceController {
     return this.complianceService.listReportedDocuments(session!.organization!.id);
   }
 
+  @Get("documents")
+  listComplianceDocuments(
+    @CurrentSession() session: AuthenticatedRequest["currentSession"],
+  ) {
+    requirePermission(session, "compliance.read");
+    return this.complianceService.listComplianceDocuments(session!.organization!.id);
+  }
+
   @Get("integration")
   getIntegration(@CurrentSession() session: AuthenticatedRequest["currentSession"]) {
     requirePermission(session, "compliance.read");

@@ -11,24 +11,55 @@ import {
   type ComplianceTransportClient,
   ComplianceTransportError,
 } from "./compliance-transport";
-import { enqueueComplianceSubmission } from "./compliance-queue";
+import {
+  enqueueComplianceDeadLetter,
+  enqueueComplianceSubmission,
+} from "./compliance-queue";
+import { ComplianceEncryptionService } from "./encryption.service";
 
 type PrismaClientLike = PrismaClient | Prisma.TransactionClient;
 
+const complianceEncryptionService = new ComplianceEncryptionService();
+
 function onboardingTransportCredentials(onboarding: {
+  id: string;
   csid: string | null;
   certificateSecret: string | null;
   certificatePem: string | null;
-} | null): ComplianceTransportCredentials | null {
+} | null): {
+  credentials: ComplianceTransportCredentials | null;
+  rotatedSecretCipher: string | null;
+} {
   if (!onboarding?.csid || !onboarding.certificateSecret) {
-    return null;
+    return {
+      credentials: null,
+      rotatedSecretCipher: null,
+    };
   }
 
+  let clientSecret: string;
+  try {
+    clientSecret = complianceEncryptionService.decrypt(onboarding.certificateSecret);
+  } catch {
+    throw new ComplianceTransportError({
+      message:
+        "Compliance onboarding secret cannot be decrypted. Verify encryption key configuration.",
+      category: "CONFIGURATION",
+      retryable: false,
+    });
+  }
+  const rotatedSecretCipher =
+    complianceEncryptionService.reencryptWithCurrentKey(onboarding.certificateSecret);
+
   return {
-    clientId: onboarding.csid,
-    clientSecret: onboarding.certificateSecret,
-    certificatePem: onboarding.certificatePem,
-    certificateSecret: onboarding.certificateSecret,
+    credentials: {
+      clientId: onboarding.csid,
+      clientSecret,
+      certificatePem: onboarding.certificatePem,
+      certificateSecret: clientSecret,
+    },
+    rotatedSecretCipher:
+      rotatedSecretCipher !== onboarding.certificateSecret ? rotatedSecretCipher : null,
   };
 }
 
@@ -110,6 +141,13 @@ export async function processComplianceSubmission(input: {
   submissionId: string;
   transport?: ComplianceTransportClient;
   enqueueRetry?: (submissionId: string, delayMs: number) => Promise<void>;
+  enqueueDeadLetter?: (job: {
+    submissionId: string;
+    reason: string;
+    failureCategory: ComplianceFailureCategory;
+    attemptNumber: number;
+    failedAt: Date;
+  }) => Promise<void>;
 }) {
   const transport = input.transport ?? createComplianceTransportClient();
   const now = new Date();
@@ -201,6 +239,19 @@ export async function processComplianceSubmission(input: {
         retryable: false,
       });
     }
+    const transportCredentials = onboardingTransportCredentials(
+      complianceDocument.onboarding,
+    );
+    if (transportCredentials.rotatedSecretCipher) {
+      await input.prisma.complianceOnboarding.update({
+        where: { id: complianceDocument.onboarding.id },
+        data: {
+          certificateSecret: transportCredentials.rotatedSecretCipher,
+        },
+      });
+      complianceDocument.onboarding.certificateSecret =
+        transportCredentials.rotatedSecretCipher;
+    }
 
     const result = await transport.submit({
       flow: submission.flow,
@@ -210,7 +261,7 @@ export async function processComplianceSubmission(input: {
       attemptNumber,
       invoiceHash: complianceDocument.currentHash,
       xmlContent: complianceDocument.xmlContent,
-      credentials: onboardingTransportCredentials(complianceDocument.onboarding),
+      credentials: transportCredentials.credentials,
       onboarding: complianceDocument.onboarding
         ? {
             environment: complianceDocument.onboarding.environment,
@@ -383,6 +434,16 @@ export async function processComplianceSubmission(input: {
       transportError.category,
     );
     const completedAt = new Date();
+    const shouldDeadLetter =
+      !retryable && nextDocumentStatus === "FAILED" && transportError.retryable;
+    const failureResponsePayload = shouldDeadLetter
+      ? ({
+          ...(transportError.responsePayload ?? {}),
+          deadLettered: true,
+          deadLetteredAt: completedAt.toISOString(),
+          deadLetterReason: transportError.message,
+        } as Record<string, unknown>)
+      : transportError.responsePayload;
 
     await input.prisma.zatcaSubmissionAttempt.update({
       where: { id: attempt.id },
@@ -392,7 +453,7 @@ export async function processComplianceSubmission(input: {
         httpStatus: transportError.statusCode,
         failureCategory: transportError.category,
         externalSubmissionId: transportError.externalSubmissionId,
-        responsePayload: transportError.responsePayload as Prisma.InputJsonValue,
+        responsePayload: failureResponsePayload as Prisma.InputJsonValue,
         errorMessage: transportError.message,
         finishedAt: completedAt,
       },
@@ -411,7 +472,7 @@ export async function processComplianceSubmission(input: {
         errorMessage: transportError.message,
         failureCategory: transportError.category,
         externalSubmissionId: transportError.externalSubmissionId,
-        responsePayload: transportError.responsePayload as Prisma.InputJsonValue,
+        responsePayload: failureResponsePayload as Prisma.InputJsonValue,
       },
     });
 
@@ -474,7 +535,7 @@ export async function processComplianceSubmission(input: {
         ? "compliance.submission.retry_scheduled"
         : nextDocumentStatus === "REJECTED"
           ? "compliance.submission.rejected"
-          : "compliance.submission.failed",
+          : "compliance.submission.final_failure",
       status: nextDocumentStatus,
       message: transportError.message,
       metadata: {
@@ -493,6 +554,48 @@ export async function processComplianceSubmission(input: {
           });
         });
       await enqueueRetry(submission.id, retryDelayMs!);
+    } else if (shouldDeadLetter) {
+      const enqueueDeadLetter =
+        input.enqueueDeadLetter ??
+        (async (job: {
+          submissionId: string;
+          reason: string;
+          failureCategory: ComplianceFailureCategory;
+          attemptNumber: number;
+          failedAt: Date;
+        }) => {
+          await enqueueComplianceDeadLetter({
+            job: {
+              submissionId: job.submissionId,
+              reason: job.reason,
+              failureCategory: job.failureCategory,
+              attemptNumber: job.attemptNumber,
+              failedAt: job.failedAt.toISOString(),
+            },
+          });
+        });
+
+      await enqueueDeadLetter({
+        submissionId: submission.id,
+        reason: transportError.message,
+        failureCategory: transportError.category,
+        attemptNumber,
+        failedAt: completedAt,
+      });
+      await createComplianceEvent(input.prisma, {
+        organizationId: submission.organizationId,
+        salesInvoiceId: salesInvoice.id,
+        complianceDocumentId: complianceDocument.id,
+        complianceOnboardingId: complianceDocument.onboardingId ?? null,
+        zatcaSubmissionId: submission.id,
+        action: "compliance.submission.dead_lettered",
+        status: nextDocumentStatus,
+        message: "Submission moved to dead-letter queue after terminal failure.",
+        metadata: {
+          category: transportError.category,
+          attemptNumber,
+        } as Prisma.InputJsonValue,
+      });
     }
 
     return {
@@ -506,6 +609,13 @@ export async function processDueComplianceSubmissions(input?: {
   prisma?: PrismaClientLike;
   transport?: ComplianceTransportClient;
   enqueueRetry?: (submissionId: string, delayMs: number) => Promise<void>;
+  enqueueDeadLetter?: (job: {
+    submissionId: string;
+    reason: string;
+    failureCategory: ComplianceFailureCategory;
+    attemptNumber: number;
+    failedAt: Date;
+  }) => Promise<void>;
 }) {
   const prisma = input?.prisma ?? new PrismaClient();
   const now = new Date();
@@ -530,6 +640,7 @@ export async function processDueComplianceSubmissions(input?: {
         submissionId: submission.id,
         transport: input?.transport,
         enqueueRetry: input?.enqueueRetry,
+        enqueueDeadLetter: input?.enqueueDeadLetter,
       });
       results.push(result);
     }

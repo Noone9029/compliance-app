@@ -113,6 +113,10 @@ describe("DocumentDetail", () => {
               warnings: ["Tag order differs from canonical sort."],
               errors: [],
             },
+            localValidationMetadata: null,
+            hashMetadata: null,
+            qrMetadata: null,
+            signatureMetadata: null,
             retryAllowed: false,
             canShareWithCustomer: true,
             submission: {

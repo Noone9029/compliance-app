@@ -1006,6 +1006,14 @@ model ComplianceDocument {
   onboardingId         String?
   reportedAt           DateTime?
   submissionFlow       ComplianceSubmissionFlow   @default(REPORTING)
+  validationStatus     ComplianceValidationStatus?
+  validationWarnings   Json?
+  validationErrors     Json?
+  validationMetadata   Json?
+  validationRanAt      DateTime?
+  hashMetadata         Json?
+  qrMetadata           Json?
+  signatureMetadata    Json?
   xmlContent           String                     @default("")
   onboarding           ComplianceOnboarding?      @relation(fields: [onboardingId], references: [id])
   organization         Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1466,6 +1474,12 @@ enum ComplianceFailureCategory {
   ZATCA_REJECTION
   TERMINAL
   UNKNOWN
+}
+
+enum ComplianceValidationStatus {
+  PASSED
+  FAILED
+  SKIPPED
 }
 
 enum CreditNoteStatus {
