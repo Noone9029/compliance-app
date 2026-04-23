@@ -5,6 +5,10 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import type {
+  ComplianceFailureCategory,
+  ComplianceDeadLetterDetailRecord,
+  ComplianceDeadLetterRecord,
+  ComplianceDeadLetterState,
   ComplianceDocumentRecord,
   ComplianceMonitorInvoiceRecord,
   ComplianceOnboardingRecord,
@@ -39,6 +43,10 @@ import { ComplianceLocalValidationService } from "./compliance-local-validation.
 import { ComplianceQueueService } from "./compliance-queue.service";
 import { fingerprintSecret } from "./compliance-transport";
 import { injectSignatureExtensionIntoInvoiceXml } from "./compliance-ubl";
+import {
+  redactSensitiveText,
+  sanitizeSensitiveObject,
+} from "./secret-redaction";
 
 const eInvoiceIntegrationKey = "week10.einvoice.integration";
 const paymentMeansOptions = [
@@ -103,12 +111,31 @@ type CredentialSnapshot = {
   revokedAt: string | null;
 };
 
+type DeadLetterLifecycleSnapshot = {
+  state: ComplianceDeadLetterState;
+  reason: string;
+  failedAt: string;
+  wasRetryable: boolean;
+  acknowledgedAt: string | null;
+  escalatedAt: string | null;
+  requeuedAt: string | null;
+};
+
 type IntegrationConfig = {
   environment: "Production" | "Sandbox";
   integrationDate?: string | null;
   status?: "REGISTERED" | "NOT_REGISTERED";
   mappings?: Record<string, string | null>;
 };
+
+type ComplianceEnvironment = IntegrationConfig["environment"];
+
+const deadLetterLifecycleActions = [
+  "compliance.submission.dead_lettered",
+  "compliance.submission.dead_letter_acknowledged",
+  "compliance.submission.dead_letter_escalated",
+  "compliance.submission.dead_letter_requeued",
+] as const;
 
 function reportedDocumentRecord(record: {
   id: string;
@@ -191,11 +218,13 @@ function extractTransportMessages(payload: Prisma.JsonValue | null | undefined) 
       ? value
           .map((entry) => {
             if (typeof entry === "string") {
-              return entry.trim();
+              return redactSensitiveText(entry.trim());
             }
             if (entry && typeof entry === "object") {
               const message = (entry as { message?: unknown }).message;
-              return typeof message === "string" ? message.trim() : "";
+              return typeof message === "string"
+                ? redactSensitiveText(message.trim())
+                : "";
             }
             return "";
           })
@@ -211,6 +240,158 @@ function extractTransportMessages(payload: Prisma.JsonValue | null | undefined) 
     warnings: normalizeMessages(data.warnings),
     errors: normalizeMessages(data.errors),
   };
+}
+
+function deadLetterMetadataObject(
+  value: Prisma.JsonValue | null | undefined,
+): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  if ("deadLetter" in value) {
+    const deadLetter = (value as { deadLetter?: unknown }).deadLetter;
+    if (deadLetter && typeof deadLetter === "object" && !Array.isArray(deadLetter)) {
+      return deadLetter as Record<string, unknown>;
+    }
+  }
+
+  return null;
+}
+
+function deadLetterReasonFromMetadata(
+  metadata: Prisma.JsonValue | null | undefined,
+): string | null {
+  const object = deadLetterMetadataObject(metadata);
+  if (!object) {
+    return null;
+  }
+
+  const raw = object.reason;
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return redactSensitiveText(raw.trim());
+  }
+
+  return null;
+}
+
+function deadLetterTimestampFromMetadata(
+  metadata: Prisma.JsonValue | null | undefined,
+  key: "failedAt" | "acknowledgedAt" | "escalatedAt" | "requeuedAt",
+) {
+  const object = deadLetterMetadataObject(metadata);
+  if (!object) {
+    return null;
+  }
+
+  const raw = object[key];
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return null;
+  }
+
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString();
+}
+
+function deadLetterRetryableFromMetadata(
+  metadata: Prisma.JsonValue | null | undefined,
+) {
+  const object = deadLetterMetadataObject(metadata);
+  if (!object) {
+    return null;
+  }
+
+  const raw = object.wasRetryable;
+  return typeof raw === "boolean" ? raw : null;
+}
+
+function isDeadLetterRequeueEligible(
+  category: ComplianceFailureCategory | null,
+  wasRetryable: boolean,
+) {
+  if (!wasRetryable) {
+    return false;
+  }
+
+  return category === "CONNECTIVITY" || category === "UNKNOWN";
+}
+
+function deadLetterLifecycleSnapshot(input: {
+  events: {
+    action: string;
+    createdAt: Date;
+    metadata: Prisma.JsonValue | null;
+    message: string | null;
+  }[];
+  fallbackReason: string | null;
+  fallbackFailedAt: Date;
+  fallbackRetryable: boolean;
+}): DeadLetterLifecycleSnapshot | null {
+  let current: DeadLetterLifecycleSnapshot | null = null;
+
+  for (const event of input.events) {
+    if (event.action === "compliance.submission.dead_lettered") {
+      current = {
+        state: "OPEN",
+        reason:
+          deadLetterReasonFromMetadata(event.metadata) ??
+          (event.message ? redactSensitiveText(event.message) : null) ??
+          (input.fallbackReason ? redactSensitiveText(input.fallbackReason) : null) ??
+          "Submission reached dead-letter queue.",
+        failedAt:
+          deadLetterTimestampFromMetadata(event.metadata, "failedAt") ??
+          event.createdAt.toISOString(),
+        wasRetryable:
+          deadLetterRetryableFromMetadata(event.metadata) ?? input.fallbackRetryable,
+        acknowledgedAt: null,
+        escalatedAt: null,
+        requeuedAt: null,
+      };
+      continue;
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    if (event.action === "compliance.submission.dead_letter_acknowledged") {
+      current = {
+        ...current,
+        state: "ACKNOWLEDGED",
+        acknowledgedAt:
+          deadLetterTimestampFromMetadata(event.metadata, "acknowledgedAt") ??
+          event.createdAt.toISOString(),
+      };
+      continue;
+    }
+
+    if (event.action === "compliance.submission.dead_letter_escalated") {
+      current = {
+        ...current,
+        state: "ESCALATED",
+        escalatedAt:
+          deadLetterTimestampFromMetadata(event.metadata, "escalatedAt") ??
+          event.createdAt.toISOString(),
+      };
+      continue;
+    }
+
+    if (event.action === "compliance.submission.dead_letter_requeued") {
+      current = {
+        ...current,
+        state: "REQUEUED",
+        requeuedAt:
+          deadLetterTimestampFromMetadata(event.metadata, "requeuedAt") ??
+          event.createdAt.toISOString(),
+      };
+    }
+  }
+
+  return current;
 }
 
 function submissionRecord(record: {
@@ -263,7 +444,7 @@ function submissionRecord(record: {
     finishedAt: record.finishedAt?.toISOString() ?? null,
     failureCategory: record.failureCategory,
     externalSubmissionId: record.externalSubmissionId,
-    errorMessage: record.errorMessage,
+    errorMessage: record.errorMessage ? redactSensitiveText(record.errorMessage) : null,
     requestId: response.requestId,
     warnings: response.warnings,
     errors: response.errors,
@@ -318,7 +499,7 @@ function attemptRecord(record: {
     httpStatus: record.httpStatus,
     failureCategory: record.failureCategory,
     externalSubmissionId: record.externalSubmissionId,
-    errorMessage: record.errorMessage,
+    errorMessage: record.errorMessage ? redactSensitiveText(record.errorMessage) : null,
     requestId: response.requestId,
     warnings: response.warnings,
     errors: response.errors,
@@ -508,6 +689,305 @@ export class ComplianceService {
       total: document.salesInvoice.total.toString(),
       compliance: this.complianceDocumentRecord(document),
     }));
+  }
+
+  async listDeadLetterItems(
+    organizationId: string,
+  ): Promise<ComplianceDeadLetterRecord[]> {
+    const submissions = await this.prisma.zatcaSubmission.findMany({
+      where: {
+        organizationId,
+        events: {
+          some: {
+            action: "compliance.submission.dead_lettered",
+          },
+        },
+      },
+      orderBy: { updatedAt: "desc" },
+      include: {
+        complianceDocument: {
+          include: {
+            salesInvoice: true,
+          },
+        },
+        events: {
+          where: {
+            action: {
+              in: [...deadLetterLifecycleActions],
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+
+    return submissions
+      .map((submission) => this.deadLetterRecord(submission))
+      .filter(
+        (record): record is ComplianceDeadLetterRecord =>
+          Boolean(record && record.state !== "REQUEUED"),
+      );
+  }
+
+  async getDeadLetterItem(
+    organizationId: string,
+    submissionId: string,
+  ): Promise<ComplianceDeadLetterDetailRecord> {
+    const submission = await this.prisma.zatcaSubmission.findFirst({
+      where: {
+        id: submissionId,
+        organizationId,
+        events: {
+          some: {
+            action: "compliance.submission.dead_lettered",
+          },
+        },
+      },
+      include: {
+        complianceDocument: {
+          include: complianceDocumentWithRelationsInclude,
+        },
+        events: {
+          where: {
+            action: {
+              in: [...deadLetterLifecycleActions],
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+
+    if (!submission) {
+      throw new NotFoundException("Dead-letter submission not found.");
+    }
+
+    const deadLetter = this.deadLetterRecord(submission);
+    if (!deadLetter) {
+      throw new NotFoundException("Dead-letter submission not found.");
+    }
+
+    return {
+      ...deadLetter,
+      compliance: this.complianceDocumentRecord(submission.complianceDocument),
+      timeline: submission.complianceDocument.events.map(timelineRecord),
+    };
+  }
+
+  async acknowledgeDeadLetterItem(
+    organizationId: string,
+    userId: string,
+    submissionId: string,
+    note?: string | null,
+  ): Promise<ComplianceDeadLetterDetailRecord> {
+    const context = await this.deadLetterContextOrThrow(organizationId, submissionId);
+    if (context.lifecycle.state === "REQUEUED") {
+      throw new BadRequestException("Dead-letter submission is already requeued.");
+    }
+
+    if (context.lifecycle.state === "ACKNOWLEDGED") {
+      return this.getDeadLetterItem(organizationId, submissionId);
+    }
+
+    const acknowledgedAt = new Date();
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+        complianceDocumentId: context.submission.complianceDocumentId,
+        zatcaSubmissionId: context.submission.id,
+        actorUserId: userId,
+        action: "compliance.submission.dead_letter_acknowledged",
+        status: "ACKNOWLEDGED",
+        message: "Dead-letter submission acknowledged for operator follow-up.",
+        metadata: {
+          acknowledgedAt: acknowledgedAt.toISOString(),
+          note: note ? redactSensitiveText(note) : null,
+          failureCategory: context.submission.failureCategory,
+          attemptCount: context.submission.attemptCount,
+          maxAttempts: context.submission.maxAttempts,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return this.getDeadLetterItem(organizationId, submissionId);
+  }
+
+  async escalateDeadLetterItem(
+    organizationId: string,
+    userId: string,
+    submissionId: string,
+    note?: string | null,
+  ): Promise<ComplianceDeadLetterDetailRecord> {
+    const context = await this.deadLetterContextOrThrow(organizationId, submissionId);
+    if (context.lifecycle.state === "REQUEUED") {
+      throw new BadRequestException("Dead-letter submission is already requeued.");
+    }
+
+    const escalatedAt = new Date();
+    await this.prisma.complianceEvent.create({
+      data: {
+        organizationId,
+        salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+        complianceDocumentId: context.submission.complianceDocumentId,
+        zatcaSubmissionId: context.submission.id,
+        actorUserId: userId,
+        action: "compliance.submission.dead_letter_escalated",
+        status: "ESCALATED",
+        message: "Dead-letter submission escalated for administrator review.",
+        metadata: {
+          escalatedAt: escalatedAt.toISOString(),
+          note: note ? redactSensitiveText(note) : null,
+          failureCategory: context.submission.failureCategory,
+          attemptCount: context.submission.attemptCount,
+          maxAttempts: context.submission.maxAttempts,
+        } as Prisma.InputJsonValue,
+      },
+    });
+
+    return this.getDeadLetterItem(organizationId, submissionId);
+  }
+
+  async requeueDeadLetterItem(
+    organizationId: string,
+    userId: string,
+    submissionId: string,
+  ): Promise<ComplianceDeadLetterDetailRecord> {
+    const context = await this.deadLetterContextOrThrow(organizationId, submissionId);
+    if (context.lifecycle.state === "REQUEUED") {
+      return this.getDeadLetterItem(organizationId, submissionId);
+    }
+    if (!context.canRequeue) {
+      throw new BadRequestException(
+        "This dead-letter submission is terminal and cannot be requeued.",
+      );
+    }
+
+    const targetEnvironment = await this.resolveTargetEnvironment({
+      organizationId,
+      preferredEnvironment: context.submission.complianceDocument.onboarding?.environment,
+    });
+    const onboarding = await this.findActiveOnboardingForEnvironment(
+      organizationId,
+      targetEnvironment,
+    );
+    if (!onboarding) {
+      throw new BadRequestException(
+        `ZATCA onboarding is not active for ${targetEnvironment} environment. Complete device setup before requeueing.`,
+      );
+    }
+
+    const now = new Date();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.complianceDocument.update({
+        where: { id: context.submission.complianceDocumentId },
+        data: {
+          onboardingId: onboarding.id,
+          status: "QUEUED",
+          lastSubmissionStatus: "QUEUED",
+          lastSubmittedAt: now,
+          lastError: null,
+          failureCategory: null,
+          externalSubmissionId: null,
+        },
+      });
+
+      const responsePayloadObject = this.metadataObject(
+        context.submission.responsePayload,
+      );
+      const existingDeadLetter =
+        responsePayloadObject.deadLetter &&
+        typeof responsePayloadObject.deadLetter === "object" &&
+        !Array.isArray(responsePayloadObject.deadLetter)
+          ? (responsePayloadObject.deadLetter as Record<string, unknown>)
+          : {};
+      await tx.zatcaSubmission.update({
+        where: { id: context.submission.id },
+        data: {
+          status: "QUEUED",
+          retryable: false,
+          attemptCount: 0,
+          availableAt: now,
+          lockedAt: null,
+          nextRetryAt: null,
+          errorMessage: null,
+          failureCategory: null,
+          externalSubmissionId: null,
+          responsePayload: {
+            ...responsePayloadObject,
+            deadLettered: false,
+            deadLetter: {
+              ...existingDeadLetter,
+              state: "REQUEUED",
+              requeuedAt: now.toISOString(),
+              requeuedByUserId: userId,
+            },
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.reportedDocument.upsert({
+        where: {
+          salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+        },
+        update: {
+          status: "QUEUED",
+          submissionFlow: context.submission.flow,
+          lastSubmissionStatus: "QUEUED",
+          failureCategory: null,
+          externalSubmissionId: null,
+          responseCode: null,
+          responseMessage: "Dead-letter submission requeued by operator.",
+          submittedAt: now,
+        },
+        create: {
+          organizationId,
+          salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+          complianceDocumentId: context.submission.complianceDocumentId,
+          documentNumber: context.submission.complianceDocument.salesInvoice.invoiceNumber,
+          status: "QUEUED",
+          submissionFlow: context.submission.flow,
+          lastSubmissionStatus: "QUEUED",
+          responseMessage: "Dead-letter submission requeued by operator.",
+          submittedAt: now,
+        },
+      });
+
+      await tx.complianceEvent.create({
+        data: {
+          organizationId,
+          salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+          complianceDocumentId: context.submission.complianceDocumentId,
+          complianceOnboardingId: onboarding.id,
+          zatcaSubmissionId: context.submission.id,
+          actorUserId: userId,
+          action: "compliance.submission.dead_letter_requeued",
+          status: "QUEUED",
+          message: "Dead-letter submission requeued by operator.",
+          metadata: {
+            requeuedAt: now.toISOString(),
+            failureCategory: context.submission.failureCategory,
+            attemptCount: context.submission.attemptCount,
+            maxAttempts: context.submission.maxAttempts,
+            previousDeadLetterState: context.lifecycle.state,
+          } as Prisma.InputJsonValue,
+        },
+      });
+
+      await tx.invoiceStatusEvent.create({
+        data: {
+          salesInvoiceId: context.submission.complianceDocument.salesInvoiceId,
+          actorUserId: userId,
+          action: "sales.invoice.compliance_dead_letter_requeued",
+          fromStatus: context.submission.complianceDocument.salesInvoice.status,
+          toStatus: context.submission.complianceDocument.salesInvoice.status,
+          message: "Dead-letter submission was requeued by an operator.",
+        },
+      });
+    });
+
+    await this.complianceQueueService.enqueueSubmission(submissionId);
+    return this.getDeadLetterItem(organizationId, submissionId);
   }
 
   async getIntegration(organizationId: string): Promise<EInvoiceIntegrationRecord> {
@@ -1878,12 +2358,11 @@ export class ComplianceService {
       return this.getInvoiceComplianceDocument(organizationId, invoiceId);
     }
 
-    const [organizationTaxDetail, activeOnboarding, previousDocument, integrationSetting] =
+    const [organizationTaxDetail, previousDocument, integrationSetting] =
       await Promise.all([
         this.prisma.organizationTaxDetail.findUnique({
           where: { organizationId },
         }),
-        this.findActiveOnboarding(organizationId),
         this.prisma.complianceDocument.findFirst({
           where: {
             organizationId,
@@ -1908,6 +2387,11 @@ export class ComplianceService {
           },
         }),
       ]);
+    const integrationConfig = this.integrationConfig(integrationSetting?.value);
+    const activeOnboarding = await this.findActiveOnboardingForEnvironment(
+      organizationId,
+      integrationConfig.environment,
+    );
 
     if (!organizationTaxDetail) {
       throw new NotFoundException("Organisation tax details are not configured.");
@@ -1915,7 +2399,7 @@ export class ComplianceService {
 
     if (!activeOnboarding) {
       throw new BadRequestException(
-        "ZATCA onboarding is not active. Complete device setup before submitting invoices.",
+        `ZATCA onboarding is not active for ${integrationConfig.environment} environment. Complete device setup before submitting invoices.`,
       );
     }
 
@@ -1929,7 +2413,6 @@ export class ComplianceService {
     const uuid =
       invoice.complianceDocument?.uuid ?? generateComplianceUuid();
     const previousHash = previousDocument?.currentHash ?? firstPreviousInvoiceHash();
-    const integrationConfig = this.integrationConfig(integrationSetting?.value);
     const mappedPaymentMeansCode =
       invoice.payments
         .map((payment) =>
@@ -2150,10 +2633,11 @@ export class ComplianceService {
       errors: validationErrors,
     } as const;
     if (localValidation.status === "FAILED") {
-      const validationFailureMessage =
+      const validationFailureMessage = redactSensitiveText(
         `Local ZATCA SDK validation failed before submission. ${localValidationSummary.errors
           .map((entry) => entry)
-          .join(" | ")}`;
+          .join(" | ")}`,
+      );
       const failureDocument = await this.prisma.complianceDocument.upsert({
         where: { salesInvoiceId: invoiceId },
         update: {
@@ -2405,6 +2889,11 @@ export class ComplianceService {
       include: {
         submission: true,
         salesInvoice: true,
+        onboarding: {
+          select: {
+            environment: true,
+          },
+        },
       },
     });
 
@@ -2416,10 +2905,17 @@ export class ComplianceService {
       return this.getInvoiceComplianceDocument(organizationId, invoiceId);
     }
 
-    const onboarding = await this.findActiveOnboarding(organizationId);
+    const targetEnvironment = await this.resolveTargetEnvironment({
+      organizationId,
+      preferredEnvironment: document.onboarding?.environment ?? null,
+    });
+    const onboarding = await this.findActiveOnboardingForEnvironment(
+      organizationId,
+      targetEnvironment,
+    );
     if (!onboarding) {
       throw new BadRequestException(
-        "ZATCA onboarding is not active. Complete device setup before retrying.",
+        `ZATCA onboarding is not active for ${targetEnvironment} environment. Complete device setup before retrying.`,
       );
     }
 
@@ -2614,6 +3110,152 @@ export class ComplianceService {
     };
   }
 
+  private deadLetterRecord(
+    submission: {
+      id: string;
+      complianceDocumentId: string;
+      flow: "CLEARANCE" | "REPORTING";
+      status:
+        | "QUEUED"
+        | "PROCESSING"
+        | "ACCEPTED"
+        | "ACCEPTED_WITH_WARNINGS"
+        | "RETRY_SCHEDULED"
+        | "REJECTED"
+        | "FAILED";
+      failureCategory:
+        | "CONFIGURATION"
+        | "AUTHENTICATION"
+        | "CONNECTIVITY"
+        | "VALIDATION"
+        | "ZATCA_REJECTION"
+        | "TERMINAL"
+        | "UNKNOWN"
+        | null;
+      errorMessage: string | null;
+      responsePayload: Prisma.JsonValue | null;
+      externalSubmissionId: string | null;
+      attemptCount: number;
+      maxAttempts: number;
+      updatedAt: Date;
+      finishedAt: Date | null;
+      lastAttemptAt: Date | null;
+      events: {
+        action: string;
+        createdAt: Date;
+        metadata: Prisma.JsonValue | null;
+        message: string | null;
+      }[];
+      complianceDocument: {
+        salesInvoiceId: string;
+        salesInvoice: {
+          invoiceNumber: string;
+        };
+      };
+    },
+  ): ComplianceDeadLetterRecord | null {
+    const lifecycle = deadLetterLifecycleSnapshot({
+      events: submission.events,
+      fallbackReason: submission.errorMessage,
+      fallbackFailedAt:
+        submission.finishedAt ?? submission.lastAttemptAt ?? submission.updatedAt,
+      fallbackRetryable: submission.failureCategory === "CONNECTIVITY",
+    });
+    if (!lifecycle) {
+      return null;
+    }
+
+    const transport = extractTransportMessages(submission.responsePayload);
+    const failedAt =
+      lifecycle.failedAt ??
+      (submission.finishedAt ?? submission.lastAttemptAt ?? submission.updatedAt)
+        .toISOString();
+    const canRequeue = isDeadLetterRequeueEligible(
+      submission.failureCategory,
+      lifecycle.wasRetryable,
+    );
+
+    return {
+      submissionId: submission.id,
+      complianceDocumentId: submission.complianceDocumentId,
+      salesInvoiceId: submission.complianceDocument.salesInvoiceId,
+      invoiceNumber: submission.complianceDocument.salesInvoice.invoiceNumber,
+      submissionFlow: submission.flow,
+      submissionStatus: submission.status,
+      state: lifecycle.state,
+      failureCategory: submission.failureCategory,
+      lastError: submission.errorMessage
+        ? redactSensitiveText(submission.errorMessage)
+        : null,
+      reason: lifecycle.reason,
+      failedAt,
+      attemptCount: submission.attemptCount,
+      maxAttempts: submission.maxAttempts,
+      wasRetryable: lifecycle.wasRetryable,
+      canRequeue,
+      acknowledgedAt: lifecycle.acknowledgedAt,
+      escalatedAt: lifecycle.escalatedAt,
+      requeuedAt: lifecycle.requeuedAt,
+      requestId: transport.requestId,
+      externalSubmissionId: submission.externalSubmissionId,
+      updatedAt: submission.updatedAt.toISOString(),
+    };
+  }
+
+  private async deadLetterContextOrThrow(
+    organizationId: string,
+    submissionId: string,
+  ) {
+    const submission = await this.prisma.zatcaSubmission.findFirst({
+      where: {
+        id: submissionId,
+        organizationId,
+        events: {
+          some: {
+            action: "compliance.submission.dead_lettered",
+          },
+        },
+      },
+      include: {
+        complianceDocument: {
+          include: {
+            salesInvoice: true,
+            onboarding: {
+              select: {
+                environment: true,
+              },
+            },
+          },
+        },
+        events: {
+          where: {
+            action: {
+              in: [...deadLetterLifecycleActions],
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+      },
+    });
+
+    if (!submission) {
+      throw new NotFoundException("Dead-letter submission not found.");
+    }
+
+    const record = this.deadLetterRecord(submission);
+    if (!record) {
+      throw new NotFoundException("Dead-letter submission not found.");
+    }
+
+    return {
+      submission,
+      lifecycle: {
+        state: record.state,
+      },
+      canRequeue: record.canRequeue,
+    };
+  }
+
   private async readOnboardingSecret(input: {
     onboardingId: string;
     field: "privateKeyPem" | "certificateSecret";
@@ -2645,37 +3287,7 @@ export class ComplianceService {
   private sanitizeOnboardingMetadata(
     value: Record<string, unknown> | null | undefined,
   ): Record<string, unknown> | null {
-    if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return null;
-    }
-
-    const sensitive = new Set([
-      "secret",
-      "certificateSecret",
-      "privateKeyPem",
-      "privateKey",
-      "private_key",
-    ]);
-    const sanitize = (node: unknown): unknown => {
-      if (Array.isArray(node)) {
-        return node.map((entry) => sanitize(entry));
-      }
-      if (node && typeof node === "object") {
-        return Object.entries(node as Record<string, unknown>).reduce<
-          Record<string, unknown>
-        >((accumulator, [key, entry]) => {
-          if (sensitive.has(key)) {
-            accumulator[key] = "[REDACTED]";
-            return accumulator;
-          }
-          accumulator[key] = sanitize(entry);
-          return accumulator;
-        }, {});
-      }
-      return node;
-    };
-
-    return sanitize(value) as Record<string, unknown>;
+    return sanitizeSensitiveObject(value);
   }
 
   private mergeOnboardingMetadata(
@@ -2743,12 +3355,12 @@ export class ComplianceService {
 
   private onboardingClientErrorMessage(error: unknown, fallback: string) {
     if (error instanceof ComplianceOnboardingClientError && error.message.trim()) {
-      return error.message;
+      return redactSensitiveText(error.message);
     }
     if (error instanceof Error && error.message.trim()) {
-      return error.message;
+      return redactSensitiveText(error.message);
     }
-    return fallback;
+    return redactSensitiveText(fallback);
   }
 
   private credentialSnapshot(record: {
@@ -2781,5 +3393,66 @@ export class ComplianceService {
       },
       orderBy: { updatedAt: "desc" },
     });
+  }
+
+  private async findActiveOnboardingForEnvironment(
+    organizationId: string,
+    environment: ComplianceEnvironment,
+  ) {
+    const now = new Date();
+    return this.prisma.complianceOnboarding.findFirst({
+      where: {
+        organizationId,
+        environment: {
+          in: this.environmentAliases(environment),
+        },
+        status: "ACTIVE",
+        certificateStatus: "ACTIVE",
+        revokedAt: null,
+        OR: [{ certificateExpiresAt: null }, { certificateExpiresAt: { gt: now } }],
+      },
+      orderBy: { updatedAt: "desc" },
+    });
+  }
+
+  private async resolveTargetEnvironment(input: {
+    organizationId: string;
+    preferredEnvironment?: string | null;
+  }): Promise<ComplianceEnvironment> {
+    const normalized = this.normalizeEnvironment(input.preferredEnvironment);
+    if (normalized) {
+      return normalized;
+    }
+    return this.integrationEnvironment(input.organizationId);
+  }
+
+  private normalizeEnvironment(
+    environment: string | null | undefined,
+  ): ComplianceEnvironment | null {
+    if (!environment) {
+      return null;
+    }
+
+    const lowered = environment.trim().toLowerCase();
+    if (!lowered) {
+      return null;
+    }
+
+    if (lowered.includes("sandbox") || lowered.includes("simulation")) {
+      return "Sandbox";
+    }
+
+    if (lowered.includes("production") || lowered.includes("core")) {
+      return "Production";
+    }
+
+    return null;
+  }
+
+  private environmentAliases(environment: ComplianceEnvironment) {
+    if (environment === "Sandbox") {
+      return ["Sandbox", "sandbox", "Simulation", "simulation"];
+    }
+    return ["Production", "production", "Core", "core"];
   }
 }
