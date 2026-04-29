@@ -24,6 +24,7 @@ import {
 type PrismaClientLike = PrismaClient | Prisma.TransactionClient;
 
 const complianceEncryptionService = new ComplianceEncryptionService();
+const staleProcessingLockMs = 15 * 60 * 1000;
 
 function onboardingTransportCredentials(onboarding: {
   id: string;
@@ -155,6 +156,35 @@ export async function processComplianceSubmission(input: {
 }) {
   const transport = input.transport ?? createComplianceTransportClient();
   const now = new Date();
+  const staleLockedAt = new Date(now.getTime() - staleProcessingLockMs);
+  const claimed = await input.prisma.zatcaSubmission.updateMany({
+    where: {
+      id: input.submissionId,
+      OR: [
+        {
+          status: {
+            in: ["QUEUED", "RETRY_SCHEDULED"],
+          },
+        },
+        {
+          status: "PROCESSING",
+          lockedAt: {
+            lt: staleLockedAt,
+          },
+        },
+      ],
+    },
+    data: {
+      status: "PROCESSING",
+      lockedAt: now,
+      lastAttemptAt: now,
+    },
+  });
+
+  if (claimed.count !== 1) {
+    return null;
+  }
+
   const submission = await input.prisma.zatcaSubmission.findUnique({
     where: { id: input.submissionId },
     include: {
@@ -177,15 +207,6 @@ export async function processComplianceSubmission(input: {
 
   const { complianceDocument } = submission;
   const { salesInvoice } = complianceDocument;
-
-  await input.prisma.zatcaSubmission.update({
-    where: { id: submission.id },
-    data: {
-      status: "PROCESSING",
-      lockedAt: now,
-      lastAttemptAt: now,
-    },
-  });
 
   await input.prisma.complianceDocument.update({
     where: { id: complianceDocument.id },
