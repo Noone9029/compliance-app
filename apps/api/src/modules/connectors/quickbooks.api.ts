@@ -63,6 +63,10 @@ type FreshQuickBooksAccount = {
   accessToken: string;
 };
 
+type QuickBooksListOptions = {
+  modifiedSince?: Date | null;
+};
+
 @Injectable()
 export class QuickBooksApiClient {
   private static readonly pageSize = 1000;
@@ -82,7 +86,10 @@ export class QuickBooksApiClient {
     private readonly connectorCredentials: ConnectorCredentialsService
   ) {}
 
-  async listCustomers(connectorAccountId: string): Promise<QuickBooksCustomer[]> {
+  async listCustomers(
+    connectorAccountId: string,
+    options: QuickBooksListOptions = {}
+  ): Promise<QuickBooksCustomer[]> {
     const account = await this.getFreshAccount(connectorAccountId);
     const realmId = this.requireRealmId(account.externalTenantId);
 
@@ -90,12 +97,16 @@ export class QuickBooksApiClient {
       realmId,
       accessToken: account.accessToken,
       resource: "Customer",
+      modifiedSince: options.modifiedSince ?? null,
       extractItems: (data) =>
         (data.QueryResponse?.Customer as QuickBooksCustomer[] | undefined) ?? []
     });
   }
 
-  async listInvoices(connectorAccountId: string): Promise<QuickBooksInvoice[]> {
+  async listInvoices(
+    connectorAccountId: string,
+    options: QuickBooksListOptions = {}
+  ): Promise<QuickBooksInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
     const realmId = this.requireRealmId(account.externalTenantId);
 
@@ -103,6 +114,7 @@ export class QuickBooksApiClient {
       realmId,
       accessToken: account.accessToken,
       resource: "Invoice",
+      modifiedSince: options.modifiedSince ?? null,
       extractItems: (data) =>
         (data.QueryResponse?.Invoice as QuickBooksInvoice[] | undefined) ?? []
     });
@@ -186,6 +198,7 @@ export class QuickBooksApiClient {
     realmId: string;
     accessToken: string;
     resource: "Customer" | "Invoice";
+    modifiedSince?: Date | null;
     extractItems: (response: QuickBooksQueryResponse<T>) => T[];
   }): Promise<T[]> {
     const items: T[] = [];
@@ -195,7 +208,11 @@ export class QuickBooksApiClient {
       const data = await this.query<T>(
         input.realmId,
         input.accessToken,
-        this.buildPagedQuery(input.resource, startPosition)
+        this.buildPagedQuery(
+          input.resource,
+          startPosition,
+          input.modifiedSince ?? null
+        )
       );
       const pageItems = input.extractItems(data);
 
@@ -215,8 +232,27 @@ export class QuickBooksApiClient {
     );
   }
 
-  private buildPagedQuery(resource: "Customer" | "Invoice", startPosition: number) {
-    return `SELECT * FROM ${resource} STARTPOSITION ${startPosition} MAXRESULTS ${QuickBooksApiClient.pageSize}`;
+  private buildPagedQuery(
+    resource: "Customer" | "Invoice",
+    startPosition: number,
+    modifiedSince: Date | null
+  ) {
+    const where = this.buildModifiedSinceWhere(modifiedSince);
+
+    return `SELECT * FROM ${resource}${where} STARTPOSITION ${startPosition} MAXRESULTS ${QuickBooksApiClient.pageSize}`;
+  }
+
+  private buildModifiedSinceWhere(modifiedSince: Date | null) {
+    if (!modifiedSince) {
+      return "";
+    }
+
+    const timestamp = modifiedSince.getTime();
+    if (Number.isNaN(timestamp)) {
+      throw new Error("QuickBooks modifiedSince timestamp is invalid.");
+    }
+
+    return ` WHERE MetaData.LastUpdatedTime >= '${modifiedSince.toISOString()}'`;
   }
 
   private requireRealmId(value: string | null): string {

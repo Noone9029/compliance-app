@@ -704,7 +704,7 @@ describe("connectors service", () => {
     });
   });
 
-  it("records successful QuickBooks sync metadata with full-sync checkpoint fields", async () => {
+  it("runs the first QuickBooks sync as full sync without modified-since and records checkpoint metadata", async () => {
     const { service, mocks } = createServiceHarness();
     mockConnectedAccount(mocks, "QUICKBOOKS_ONLINE");
     stubImportPersistence(service);
@@ -720,13 +720,21 @@ describe("connectors service", () => {
     });
 
     const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    const updateData = mocks.updateConnectorAccount.mock.calls[0]?.[0].data;
+    expect(mocks.quickBooksApiClient.listCustomers).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
+    expect(mocks.quickBooksApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
     expect(metadata).toMatchObject({
       provider: "QUICKBOOKS_ONLINE",
       mode: "quickbooks-live",
       syncMode: "FULL",
       incrementalApplied: false,
       checkpointBefore: null,
-      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
       customersFetched: 3,
       invoicesFetched: 1,
       contactsPersisted: 2,
@@ -734,8 +742,137 @@ describe("connectors service", () => {
       invoicesQueuedForCompliance: 1,
       invoicesSkippedForCompliance: 0,
     });
+    expect(metadata.checkpointAfter).toEqual({
+      customersModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(updateData.metadata).toMatchObject({
+      sync: {
+        quickbooks: metadata.checkpointAfter,
+      },
+    });
+    expect(updateData.lastSyncedAt).toBeInstanceOf(Date);
     expectIsoTimestamp(metadata.syncStartedAt);
     expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("runs a later QuickBooks sync as incremental with overlapped modified-since", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "QUICKBOOKS_ONLINE", {
+      sync: {
+        quickbooks: {
+          customersModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+        },
+      },
+      preserved: "value",
+    });
+    stubImportPersistence(service);
+    mocks.quickBooksApiClient.listCustomers.mockResolvedValue([{ Id: "customer_1" }]);
+    mocks.quickBooksApiClient.listInvoices.mockResolvedValue([{ Id: "invoice_1" }]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const expectedModifiedSince = new Date("2026-04-29T09:50:00.000Z");
+    expect(mocks.quickBooksApiClient.listCustomers).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+    expect(mocks.quickBooksApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "QUICKBOOKS_ONLINE",
+      mode: "quickbooks-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        customersModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+      },
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expect(metadata.checkpointAfter).toEqual({
+      customersModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(mocks.updateConnectorAccount.mock.calls[0]?.[0].data.metadata).toMatchObject({
+      preserved: "value",
+      sync: {
+        quickbooks: metadata.checkpointAfter,
+      },
+    });
+  });
+
+  it("does not advance QuickBooks checkpoint when provider fetch fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "QUICKBOOKS_ONLINE", {
+      sync: {
+        quickbooks: {
+          customersModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+        },
+      },
+    });
+    mocks.quickBooksApiClient.listCustomers.mockRejectedValue(
+      new Error("QuickBooks unavailable"),
+    );
+    mocks.quickBooksApiClient.listInvoices.mockResolvedValue([]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "QUICKBOOKS_ONLINE",
+      mode: "quickbooks-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        customersModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+      },
+      checkpointAfter: null,
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expectIsoTimestamp(metadata.syncFailedAt);
+  });
+
+  it("does not advance QuickBooks checkpoint when local import persistence fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "QUICKBOOKS_ONLINE");
+    vi.spyOn(service as any, "persistCanonicalImportBundle").mockRejectedValue(
+      new Error("Import persistence failed"),
+    );
+    mocks.quickBooksApiClient.listCustomers.mockResolvedValue([{ Id: "customer_1" }]);
+    mocks.quickBooksApiClient.listInvoices.mockResolvedValue([{ Id: "invoice_1" }]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "QUICKBOOKS_ONLINE",
+      mode: "quickbooks-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
+      message: "Import persistence failed",
+    });
   });
 
   it("records successful Zoho sync metadata with full-sync checkpoint fields", async () => {

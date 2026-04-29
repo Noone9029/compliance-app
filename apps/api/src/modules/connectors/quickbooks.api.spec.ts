@@ -359,6 +359,86 @@ describe("quickbooks api client", () => {
     ]);
   });
 
+  it("paginates customers with modified-since filtering", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Customer: quickBooksCustomersPage(1, 1000)
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Customer: quickBooksCustomersPage(2, 1)
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const customers = await api.listCustomers("conn_qbo_retry", {
+      modifiedSince
+    });
+
+    expect(customers).toHaveLength(1001);
+    expect(decodedQuickBooksQueries(fetchMock)).toEqual([
+      `SELECT * FROM Customer WHERE MetaData.LastUpdatedTime >= '${modifiedSince.toISOString()}' STARTPOSITION 1 MAXRESULTS 1000`,
+      `SELECT * FROM Customer WHERE MetaData.LastUpdatedTime >= '${modifiedSince.toISOString()}' STARTPOSITION 1001 MAXRESULTS 1000`
+    ]);
+  });
+
+  it("paginates invoices with modified-since filtering", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Invoice: quickBooksInvoicesPage(1, 1000)
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Invoice: []
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_qbo_retry", {
+      modifiedSince
+    });
+
+    expect(invoices).toHaveLength(1000);
+    expect(decodedQuickBooksQueries(fetchMock)).toEqual([
+      `SELECT * FROM Invoice WHERE MetaData.LastUpdatedTime >= '${modifiedSince.toISOString()}' STARTPOSITION 1 MAXRESULTS 1000`,
+      `SELECT * FROM Invoice WHERE MetaData.LastUpdatedTime >= '${modifiedSince.toISOString()}' STARTPOSITION 1001 MAXRESULTS 1000`
+    ]);
+  });
+
   it("throws if QuickBooks pagination exceeds the safety page cap", async () => {
     const { api, mocks } = createHarness();
     mockConnectedQuickBooksAccount(mocks);

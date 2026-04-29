@@ -54,9 +54,29 @@ type XeroSyncPlan = {
   overlapMinutes: number;
 };
 
+type QuickBooksSyncCheckpoint = {
+  customersModifiedSince: string;
+  invoicesModifiedSince: string;
+};
+
+type QuickBooksSyncPlan = {
+  syncMode: "FULL" | "INCREMENTAL";
+  incrementalApplied: boolean;
+  checkpointBefore: QuickBooksSyncCheckpoint | null;
+  checkpointAfter: QuickBooksSyncCheckpoint;
+  modifiedSince: Date | null;
+  modifiedSinceApplied: string | null;
+  overlapMinutes: number;
+};
+
+type ConnectorSyncCheckpoint =
+  | XeroSyncCheckpoint
+  | QuickBooksSyncCheckpoint;
+
 @Injectable()
 export class ConnectorsService {
   private static readonly xeroCheckpointOverlapMinutes = 10;
+  private static readonly quickBooksCheckpointOverlapMinutes = 10;
 
   private readonly adapters: Map<string, ConnectorAdapter>;
   private readonly transports: Map<string, ConnectorProviderTransport>;
@@ -329,11 +349,19 @@ export class ConnectorsService {
     }
 
     const startedAt = new Date();
+    const syncPlan = this.buildQuickBooksSyncPlan(
+      (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+      startedAt
+    );
 
     try {
       const [customers, invoices] = await Promise.all([
-        this.quickBooksApiClient.listCustomers(connectorAccountId),
-        this.quickBooksApiClient.listInvoices(connectorAccountId)
+        this.quickBooksApiClient.listCustomers(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        }),
+        this.quickBooksApiClient.listInvoices(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        })
       ]);
 
       const bundle = (adapter as QuickBooksAdapter).mapLiveImportPayload({
@@ -352,40 +380,54 @@ export class ConnectorsService {
         userId,
         connectorAccountId
       );
-      
-      await this.prisma.connectorAccount.update({
-        where: { id: connectorAccountId },
-        data: {
-          lastSyncedAt: new Date()
-        }
-      });
 
       const finishedAt = new Date();
-      const log = await this.prisma.connectorSyncLog.create({
-        data: {
-          organizationId,
-          connectorAccountId,
-          direction: "IMPORT",
-          scope: "FULL",
-          status: "SUCCESS",
-          retryable: false,
-          startedAt,
-          finishedAt,
-          metadata: this.buildSuccessfulSyncMetadata({
-            provider: "QUICKBOOKS_ONLINE",
-            mode: "quickbooks-live",
+      const log = await this.prisma.$transaction(async (tx) => {
+        const createdLog = await tx.connectorSyncLog.create({
+          data: {
+            organizationId,
+            connectorAccountId,
+            direction: "IMPORT",
+            scope: "FULL",
+            status: "SUCCESS",
+            retryable: false,
             startedAt,
             finishedAt,
-            counts: {
-              customersFetched: customers.length,
-              invoicesFetched: invoices.length,
-              contactsPersisted: summary.contacts,
-              invoicesPrepared: summary.invoices,
-              invoicesQueuedForCompliance: compliance.queued,
-              invoicesSkippedForCompliance: compliance.skipped
-            }
-          })
-        }
+            metadata: this.buildSuccessfulSyncMetadata({
+              provider: "QUICKBOOKS_ONLINE",
+              mode: "quickbooks-live",
+              startedAt,
+              finishedAt,
+              syncMode: syncPlan.syncMode,
+              incrementalApplied: syncPlan.incrementalApplied,
+              checkpointBefore: syncPlan.checkpointBefore,
+              checkpointAfter: syncPlan.checkpointAfter,
+              modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+              overlapMinutes: syncPlan.overlapMinutes,
+              counts: {
+                customersFetched: customers.length,
+                invoicesFetched: invoices.length,
+                contactsPersisted: summary.contacts,
+                invoicesPrepared: summary.invoices,
+                invoicesQueuedForCompliance: compliance.queued,
+                invoicesSkippedForCompliance: compliance.skipped
+              }
+            })
+          }
+        });
+
+        await tx.connectorAccount.update({
+          where: { id: connectorAccountId },
+          data: {
+            lastSyncedAt: finishedAt,
+            metadata: this.mergeQuickBooksCheckpoint(
+              (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+              syncPlan.checkpointAfter
+            )
+          }
+        });
+
+        return createdLog;
       });
 
       return {
@@ -424,7 +466,13 @@ export class ConnectorsService {
             mode: "quickbooks-live",
             startedAt,
             failedAt,
-            message
+            message,
+            syncMode: syncPlan.syncMode,
+            incrementalApplied: syncPlan.incrementalApplied,
+            checkpointBefore: syncPlan.checkpointBefore,
+            checkpointAfter: null,
+            modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+            overlapMinutes: syncPlan.overlapMinutes
           })
         }
       });
@@ -1333,8 +1381,8 @@ export class ConnectorsService {
     finishedAt: Date;
     syncMode?: "FULL" | "INCREMENTAL";
     incrementalApplied?: boolean;
-    checkpointBefore?: XeroSyncCheckpoint | null;
-    checkpointAfter?: XeroSyncCheckpoint | null;
+    checkpointBefore?: ConnectorSyncCheckpoint | null;
+    checkpointAfter?: ConnectorSyncCheckpoint | null;
     modifiedSinceApplied?: string | null;
     overlapMinutes?: number;
     counts: Record<string, number>;
@@ -1366,8 +1414,8 @@ export class ConnectorsService {
     message: string;
     syncMode?: "FULL" | "INCREMENTAL";
     incrementalApplied?: boolean;
-    checkpointBefore?: XeroSyncCheckpoint | null;
-    checkpointAfter?: XeroSyncCheckpoint | null;
+    checkpointBefore?: ConnectorSyncCheckpoint | null;
+    checkpointAfter?: ConnectorSyncCheckpoint | null;
     modifiedSinceApplied?: string | null;
     overlapMinutes?: number;
   }) {
@@ -1399,6 +1447,112 @@ export class ConnectorsService {
       /(access[_-]?token|refresh[_-]?token|authorization|client[_-]?secret|secret|password)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
       "$1$2[REDACTED]"
     );
+  }
+
+  private buildQuickBooksSyncPlan(
+    metadata: Prisma.JsonValue | null,
+    startedAt: Date
+  ): QuickBooksSyncPlan {
+    const checkpointBefore = this.readQuickBooksCheckpoint(metadata);
+    const checkpointAfter = {
+      customersModifiedSince: startedAt.toISOString(),
+      invoicesModifiedSince: startedAt.toISOString()
+    };
+
+    if (!checkpointBefore) {
+      return {
+        syncMode: "FULL",
+        incrementalApplied: false,
+        checkpointBefore: null,
+        checkpointAfter,
+        modifiedSince: null,
+        modifiedSinceApplied: null,
+        overlapMinutes: 0
+      };
+    }
+
+    const modifiedSinceBase =
+      this.earliestQuickBooksCheckpointDate(checkpointBefore);
+    const overlapMinutes = ConnectorsService.quickBooksCheckpointOverlapMinutes;
+    const modifiedSince = new Date(
+      modifiedSinceBase.getTime() - overlapMinutes * 60 * 1000
+    );
+
+    return {
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore,
+      checkpointAfter,
+      modifiedSince,
+      modifiedSinceApplied: modifiedSince.toISOString(),
+      overlapMinutes
+    };
+  }
+
+  private readQuickBooksCheckpoint(
+    metadata: Prisma.JsonValue | null
+  ): QuickBooksSyncCheckpoint | null {
+    if (!this.isRecord(metadata)) {
+      return null;
+    }
+
+    const sync = metadata.sync;
+    if (!this.isRecord(sync)) {
+      return null;
+    }
+
+    const quickBooks = sync.quickbooks;
+    if (!this.isRecord(quickBooks)) {
+      return null;
+    }
+
+    const customersModifiedSince = this.readIsoString(
+      quickBooks.customersModifiedSince
+    );
+    const invoicesModifiedSince = this.readIsoString(
+      quickBooks.invoicesModifiedSince
+    );
+
+    if (!customersModifiedSince || !invoicesModifiedSince) {
+      return null;
+    }
+
+    return {
+      customersModifiedSince,
+      invoicesModifiedSince
+    };
+  }
+
+  private earliestQuickBooksCheckpointDate(
+    checkpoint: QuickBooksSyncCheckpoint
+  ) {
+    const dates = [
+      new Date(checkpoint.customersModifiedSince),
+      new Date(checkpoint.invoicesModifiedSince)
+    ];
+
+    return dates.reduce((earliest, current) =>
+      current.getTime() < earliest.getTime() ? current : earliest
+    );
+  }
+
+  private mergeQuickBooksCheckpoint(
+    metadata: Prisma.JsonValue | null,
+    checkpoint: QuickBooksSyncCheckpoint
+  ) {
+    const root = this.isRecord(metadata) ? { ...metadata } : {};
+    const sync = this.isRecord(root.sync) ? { ...root.sync } : {};
+    const quickBooks = this.isRecord(sync.quickbooks)
+      ? { ...sync.quickbooks }
+      : {};
+
+    sync.quickbooks = {
+      ...quickBooks,
+      ...checkpoint
+    };
+    root.sync = sync;
+
+    return root as Prisma.InputJsonValue;
   }
 
   private buildXeroSyncPlan(
