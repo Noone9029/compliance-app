@@ -341,6 +341,7 @@ export class ConnectorsService {
         }
       });
 
+      const finishedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -350,16 +351,21 @@ export class ConnectorsService {
           status: "SUCCESS",
           retryable: false,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
+          finishedAt,
+          metadata: this.buildSuccessfulSyncMetadata({
+            provider: "QUICKBOOKS_ONLINE",
             mode: "quickbooks-live",
-            customersFetched: customers.length,
-            invoicesFetched: invoices.length,
-            contactsPersisted: summary.contacts,
-            invoicesPrepared: summary.invoices,
-            invoicesQueuedForCompliance: compliance.queued,
-            invoicesSkippedForCompliance: compliance.skipped
-          } as Prisma.InputJsonValue
+            startedAt,
+            finishedAt,
+            counts: {
+              customersFetched: customers.length,
+              invoicesFetched: invoices.length,
+              contactsPersisted: summary.contacts,
+              invoicesPrepared: summary.invoices,
+              invoicesQueuedForCompliance: compliance.queued,
+              invoicesSkippedForCompliance: compliance.skipped
+            }
+          })
         }
       });
 
@@ -377,9 +383,12 @@ export class ConnectorsService {
       };
 
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "QuickBooks import failed";
+      const message = this.connectorLogErrorMessage(
+        error,
+        "QuickBooks import failed"
+      );
 
+      const failedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -390,10 +399,14 @@ export class ConnectorsService {
           retryable: true,
           message,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
-            mode: "quickbooks-live"
-          } as Prisma.InputJsonValue
+          finishedAt: failedAt,
+          metadata: this.buildFailedSyncMetadata({
+            provider: "QUICKBOOKS_ONLINE",
+            mode: "quickbooks-live",
+            startedAt,
+            failedAt,
+            message
+          })
         }
       });
 
@@ -466,6 +479,7 @@ export class ConnectorsService {
         }
       });
 
+      const finishedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -475,16 +489,21 @@ export class ConnectorsService {
           status: "SUCCESS",
           retryable: false,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
+          finishedAt,
+          metadata: this.buildSuccessfulSyncMetadata({
+            provider: "XERO",
             mode: "xero-live",
-            contactsFetched: contacts.length,
-            invoicesFetched: invoices.length,
-            contactsPersisted: summary.contacts,
-            invoicesPrepared: summary.invoices,
-            invoicesQueuedForCompliance: compliance.queued,
-            invoicesSkippedForCompliance: compliance.skipped
-          } as Prisma.InputJsonValue
+            startedAt,
+            finishedAt,
+            counts: {
+              contactsFetched: contacts.length,
+              invoicesFetched: invoices.length,
+              contactsPersisted: summary.contacts,
+              invoicesPrepared: summary.invoices,
+              invoicesQueuedForCompliance: compliance.queued,
+              invoicesSkippedForCompliance: compliance.skipped
+            }
+          })
         }
       });
 
@@ -501,8 +520,9 @@ export class ConnectorsService {
         log
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Xero import failed";
+      const message = this.connectorLogErrorMessage(error, "Xero import failed");
 
+      const failedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -513,10 +533,14 @@ export class ConnectorsService {
           retryable: true,
           message,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
-            mode: "xero-live"
-          } as Prisma.InputJsonValue
+          finishedAt: failedAt,
+          metadata: this.buildFailedSyncMetadata({
+            provider: "XERO",
+            mode: "xero-live",
+            startedAt,
+            failedAt,
+            message
+          })
         }
       });
 
@@ -589,6 +613,7 @@ export class ConnectorsService {
         }
       });
 
+      const finishedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -598,16 +623,21 @@ export class ConnectorsService {
           status: "SUCCESS",
           retryable: false,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
+          finishedAt,
+          metadata: this.buildSuccessfulSyncMetadata({
+            provider: "ZOHO_BOOKS",
             mode: "zoho-live",
-            contactsFetched: contacts.length,
-            invoicesFetched: invoices.length,
-            contactsPersisted: summary.contacts,
-            invoicesPrepared: summary.invoices,
-            invoicesQueuedForCompliance: compliance.queued,
-            invoicesSkippedForCompliance: compliance.skipped
-          } as Prisma.InputJsonValue
+            startedAt,
+            finishedAt,
+            counts: {
+              contactsFetched: contacts.length,
+              invoicesFetched: invoices.length,
+              contactsPersisted: summary.contacts,
+              invoicesPrepared: summary.invoices,
+              invoicesQueuedForCompliance: compliance.queued,
+              invoicesSkippedForCompliance: compliance.skipped
+            }
+          })
         }
       });
 
@@ -624,8 +654,9 @@ export class ConnectorsService {
         log
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Zoho import failed";
+      const message = this.connectorLogErrorMessage(error, "Zoho import failed");
 
+      const failedAt = new Date();
       const log = await this.prisma.connectorSyncLog.create({
         data: {
           organizationId,
@@ -636,10 +667,14 @@ export class ConnectorsService {
           retryable: true,
           message,
           startedAt,
-          finishedAt: new Date(),
-          metadata: {
-            mode: "zoho-live"
-          } as Prisma.InputJsonValue
+          finishedAt: failedAt,
+          metadata: this.buildFailedSyncMetadata({
+            provider: "ZOHO_BOOKS",
+            mode: "zoho-live",
+            startedAt,
+            failedAt,
+            message
+          })
         }
       });
 
@@ -1238,6 +1273,57 @@ export class ConnectorsService {
     }
 
     return fallback;
+  }
+
+  private buildSuccessfulSyncMetadata(input: {
+    provider: ConnectorProvider;
+    mode: string;
+    startedAt: Date;
+    finishedAt: Date;
+    counts: Record<string, number>;
+  }) {
+    return {
+      provider: input.provider,
+      mode: input.mode,
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      syncStartedAt: input.startedAt.toISOString(),
+      syncFinishedAt: input.finishedAt.toISOString(),
+      ...input.counts
+    } as Prisma.InputJsonValue;
+  }
+
+  private buildFailedSyncMetadata(input: {
+    provider: ConnectorProvider;
+    mode: string;
+    startedAt: Date;
+    failedAt: Date;
+    message: string;
+  }) {
+    return {
+      provider: input.provider,
+      mode: input.mode,
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      syncStartedAt: input.startedAt.toISOString(),
+      syncFailedAt: input.failedAt.toISOString(),
+      message: input.message
+    } as Prisma.InputJsonValue;
+  }
+
+  private connectorLogErrorMessage(error: unknown, fallback: string) {
+    return this.redactConnectorLogMessage(this.errorMessage(error, fallback));
+  }
+
+  private redactConnectorLogMessage(message: string) {
+    return message.replace(
+      /(access[_-]?token|refresh[_-]?token|authorization|client[_-]?secret|secret|password)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      "$1$2[REDACTED]"
+    );
   }
 
   private getAdapter(provider: ConnectorProvider) {

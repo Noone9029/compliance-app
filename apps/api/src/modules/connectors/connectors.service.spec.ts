@@ -1,4 +1,5 @@
 import { BadRequestException } from "@nestjs/common";
+import type { ConnectorProvider } from "@daftar/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConnectorProviderTransport } from "./provider-transport";
@@ -11,11 +12,26 @@ import { ConnectorsService } from "./connectors.service";
 
 function createServiceHarness() {
   const upsert = vi.fn();
+  const findFirstConnectorAccount = vi.fn();
+  const updateConnectorAccount = vi.fn();
+  const findUniqueCredential = vi.fn();
+  const createSyncLog = vi.fn(async (input) => ({
+    id: "log_1",
+    ...input.data,
+  }));
   const createOAuthState = vi.fn();
   const consumeOAuthState = vi.fn().mockResolvedValue({ count: 1 });
   const saveConnectedCredentials = vi.fn();
   const connectorAccount = {
     upsert,
+    findFirst: findFirstConnectorAccount,
+    update: updateConnectorAccount,
+  };
+  const connectorCredential = {
+    findUnique: findUniqueCredential,
+  };
+  const connectorSyncLog = {
+    create: createSyncLog,
   };
   const connectorOAuthState = {
     create: createOAuthState,
@@ -24,6 +40,8 @@ function createServiceHarness() {
 
   const prisma = {
     connectorAccount,
+    connectorCredential,
+    connectorSyncLog,
     connectorOAuthState,
     $transaction: vi.fn(async (callback: (tx: { connectorAccount: typeof connectorAccount }) => unknown) =>
       callback({ connectorAccount }),
@@ -45,18 +63,42 @@ function createServiceHarness() {
     buildAuthorizationUrl: vi.fn(),
     exchangeAuthorizationCode: vi.fn(),
   };
+  const xeroAdapter = {
+    provider: "XERO",
+    mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
+  };
+  const quickBooksAdapter = {
+    provider: "QUICKBOOKS_ONLINE",
+    mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
+  };
+  const zohoAdapter = {
+    provider: "ZOHO_BOOKS",
+    mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
+  };
+  const quickBooksApiClient = {
+    listCustomers: vi.fn(),
+    listInvoices: vi.fn(),
+  };
+  const xeroApiClient = {
+    listContacts: vi.fn(),
+    listInvoices: vi.fn(),
+  };
+  const zohoApiClient = {
+    listContacts: vi.fn(),
+    listInvoices: vi.fn(),
+  };
 
   const service = new ConnectorsService(
     prisma,
-    { provider: "XERO" } as any,
-    { provider: "QUICKBOOKS_ONLINE" } as any,
-    { provider: "ZOHO_BOOKS" } as any,
+    xeroAdapter as any,
+    quickBooksAdapter as any,
+    zohoAdapter as any,
     quickBooksTransport as any,
     xeroTransport as any,
     zohoTransport as any,
-    {} as any,
-    {} as any,
-    {} as any,
+    quickBooksApiClient as any,
+    xeroApiClient as any,
+    zohoApiClient as any,
     { saveConnectedCredentials } as any,
     {} as any,
   );
@@ -66,14 +108,55 @@ function createServiceHarness() {
     mocks: {
       prisma,
       upsert,
+      findFirstConnectorAccount,
+      updateConnectorAccount,
+      findUniqueCredential,
+      createSyncLog,
       createOAuthState,
       consumeOAuthState,
       saveConnectedCredentials,
       quickBooksTransport,
       xeroTransport,
       zohoTransport,
+      xeroAdapter,
+      quickBooksAdapter,
+      zohoAdapter,
+      quickBooksApiClient,
+      xeroApiClient,
+      zohoApiClient,
     },
   };
+}
+
+function mockConnectedAccount(
+  mocks: ReturnType<typeof createServiceHarness>["mocks"],
+  provider: ConnectorProvider,
+) {
+  mocks.findFirstConnectorAccount.mockResolvedValue({
+    id: "conn_1",
+    organizationId: "org_1",
+    provider,
+  });
+  mocks.findUniqueCredential.mockResolvedValue({ id: "credential_1" });
+  mocks.updateConnectorAccount.mockResolvedValue({});
+}
+
+function stubImportPersistence(
+  service: ConnectorsService,
+  summary = { contacts: 2, invoices: 1 },
+  compliance = { eligible: 1, queued: 1, skipped: 0, firstSkipReason: null },
+) {
+  vi.spyOn(service as any, "persistCanonicalImportBundle").mockResolvedValue(
+    summary,
+  );
+  vi.spyOn(service as any, "queueImportedInvoicesForCompliance").mockResolvedValue(
+    compliance,
+  );
+}
+
+function expectIsoTimestamp(value: unknown) {
+  expect(typeof value).toBe("string");
+  expect(Number.isNaN(Date.parse(value as string))).toBe(false);
 }
 
 describe("connectors service", () => {
@@ -379,5 +462,145 @@ describe("connectors service", () => {
     expect(mocks.quickBooksTransport.exchangeAuthorizationCode).not.toHaveBeenCalled();
     expect(mocks.consumeOAuthState).not.toHaveBeenCalled();
     expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("records successful Xero sync metadata with full-sync checkpoint fields", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO");
+    stubImportPersistence(service);
+    mocks.xeroApiClient.listContacts.mockResolvedValue([
+      { ContactID: "contact_1" },
+      { ContactID: "contact_2" },
+    ]);
+    mocks.xeroApiClient.listInvoices.mockResolvedValue([{ InvoiceID: "invoice_1" }]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "XERO",
+      mode: "xero-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      contactsFetched: 2,
+      invoicesFetched: 1,
+      contactsPersisted: 2,
+      invoicesPrepared: 1,
+      invoicesQueuedForCompliance: 1,
+      invoicesSkippedForCompliance: 0,
+    });
+    expectIsoTimestamp(metadata.syncStartedAt);
+    expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("records successful QuickBooks sync metadata with full-sync checkpoint fields", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "QUICKBOOKS_ONLINE");
+    stubImportPersistence(service);
+    mocks.quickBooksApiClient.listCustomers.mockResolvedValue([
+      { Id: "customer_1" },
+      { Id: "customer_2" },
+      { Id: "customer_3" },
+    ]);
+    mocks.quickBooksApiClient.listInvoices.mockResolvedValue([{ Id: "invoice_1" }]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "QUICKBOOKS_ONLINE",
+      mode: "quickbooks-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      customersFetched: 3,
+      invoicesFetched: 1,
+      contactsPersisted: 2,
+      invoicesPrepared: 1,
+      invoicesQueuedForCompliance: 1,
+      invoicesSkippedForCompliance: 0,
+    });
+    expectIsoTimestamp(metadata.syncStartedAt);
+    expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("records successful Zoho sync metadata with full-sync checkpoint fields", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "ZOHO_BOOKS");
+    stubImportPersistence(service);
+    mocks.zohoApiClient.listContacts.mockResolvedValue([{ contact_id: "contact_1" }]);
+    mocks.zohoApiClient.listInvoices.mockResolvedValue([
+      { invoice_id: "invoice_1" },
+      { invoice_id: "invoice_2" },
+    ]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "ZOHO_BOOKS",
+      mode: "zoho-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      contactsFetched: 1,
+      invoicesFetched: 2,
+      contactsPersisted: 2,
+      invoicesPrepared: 1,
+      invoicesQueuedForCompliance: 1,
+      invoicesSkippedForCompliance: 0,
+    });
+    expectIsoTimestamp(metadata.syncStartedAt);
+    expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("records failed live sync metadata without leaking connector secrets", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO");
+    mocks.xeroApiClient.listContacts.mockRejectedValue(
+      new Error(
+        "Xero import failed access_token=super-secret refreshToken: refresh-secret",
+      ),
+    );
+    mocks.xeroApiClient.listInvoices.mockResolvedValue([]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const logData = mocks.createSyncLog.mock.calls[0]?.[0].data;
+    const metadata = logData.metadata;
+    expect(result).toMatchObject({
+      ok: false,
+      mode: "xero-live",
+      message:
+        "Xero import failed access_token=[REDACTED] refreshToken: [REDACTED]",
+    });
+    expect(logData.message).toBe(
+      "Xero import failed access_token=[REDACTED] refreshToken: [REDACTED]",
+    );
+    expect(metadata).toMatchObject({
+      provider: "XERO",
+      mode: "xero-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      message:
+        "Xero import failed access_token=[REDACTED] refreshToken: [REDACTED]",
+    });
+    expectIsoTimestamp(metadata.syncStartedAt);
+    expectIsoTimestamp(metadata.syncFailedAt);
+    expect(JSON.stringify(metadata)).not.toMatch(/super-secret|refresh-secret/);
   });
 });
