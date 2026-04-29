@@ -31,6 +31,20 @@ Operational support procedures are documented in:
 
 If required production values are missing, services fail fast with explicit messages.
 
+## Local Environment Files
+
+| File | Gitignored | Loaded by |
+|---|---|---|
+| `.env` (root) | ✅ | preview compose, workspace scripts |
+| `.env.local` (root) | ✅ | workspace scripts only |
+| `apps/api/.env` | ✅ | workspace scripts only |
+| `apps/api/.env.local` | ✅ | workspace scripts only |
+| `.env.example` (root) | ❌ tracked | template only — never loaded at runtime |
+
+**Do not commit any `.env` file.** Use `.env.example` as the reference template.  
+For local development, copy `.env.example` to `.env` at the repo root, or work  
+directly from `apps/api/.env` — both paths are supported.
+
 ## Required Environment Variables by Service
 
 ### API (`apps/api`)

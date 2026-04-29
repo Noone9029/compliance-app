@@ -15,12 +15,40 @@ Prerequisites:
 Steps:
 
 ```powershell
-Copy-Item .env.example .env -ErrorAction SilentlyContinue
+# Option A — create a root .env from the template (simplest)
+Copy-Item .env.example .env
+
+# Option B — skip root .env; scripts and preview compose
+#             will fall back to apps/api/.env automatically
 pnpm db:up
 pnpm db:deploy
 pnpm db:seed
 pnpm preview:up
 ```
+
+### Environment files
+
+| File | Purpose | Tracked by git |
+|---|---|---|
+| `.env.example` | Template — copy to `.env` to get started | ✅ yes |
+| `.env` (root) | Root overrides loaded by scripts and preview compose | ❌ no (gitignored) |
+| `apps/api/.env` | App-level local dev vars | ❌ no (gitignored) |
+| `apps/api/.env.local` | App-level local overrides (highest priority) | ❌ no (gitignored) |
+
+**How preview compose loads env:**  
+`docker-compose.preview.yml` declares `env_file` with `required: false` for both `.env`
+and `apps/api/.env`. If neither file exists, the inline `environment:` block still
+provides all values needed to start the stack. No hard-fail on a clean checkout.
+
+**How workspace scripts load env:**  
+`scripts/run-with-workspace-env.mjs` reads files in this order (later files win):
+1. `.env` (root)
+2. `.env.local` (root)
+3. `apps/api/.env`
+4. `apps/api/.env.local`
+5. `process.env` (always wins)
+
+Missing files are silently skipped — the script never hard-fails due to an absent file.
 
 Open:
 

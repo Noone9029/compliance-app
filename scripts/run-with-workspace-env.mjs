@@ -29,9 +29,13 @@ function parseEnvFile(filePath) {
     }, {});
 }
 
+// Env loading order (later entries override earlier ones).
+// process.env always wins — see spawn env below.
 const envFromFiles = {
   ...parseEnvFile(resolve(workspaceRoot, ".env")),
-  ...parseEnvFile(resolve(workspaceRoot, ".env.local"))
+  ...parseEnvFile(resolve(workspaceRoot, ".env.local")),
+  ...parseEnvFile(resolve(workspaceRoot, "apps/api/.env")),
+  ...parseEnvFile(resolve(workspaceRoot, "apps/api/.env.local")),
 };
 
 const [command, ...args] = process.argv.slice(2);
