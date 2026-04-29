@@ -52,10 +52,16 @@ type ZohoInvoice = {
 
 type ZohoContactsResponse = {
   contacts?: ZohoContact[];
+  page_context?: ZohoPageContext;
 };
 
 type ZohoInvoicesResponse = {
   invoices?: ZohoInvoice[];
+  page_context?: ZohoPageContext;
+};
+
+type ZohoPageContext = {
+  has_more_page?: boolean;
 };
 
 type FreshZohoAccount = {
@@ -67,6 +73,9 @@ type FreshZohoAccount = {
 
 @Injectable()
 export class ZohoApiClient {
+  private static readonly pageSize = 200;
+  private static readonly maxPageCount = 1000;
+
   private readonly refreshInFlight = new Map<
     string,
     Promise<FreshZohoAccount>
@@ -83,22 +92,22 @@ export class ZohoApiClient {
 
   async listContacts(connectorAccountId: string): Promise<ZohoContact[]> {
     const account = await this.getFreshAccount(connectorAccountId);
-    const data = await this.getJson<ZohoContactsResponse>(
-      account,
-      "contacts"
-    );
 
-    return data.contacts ?? [];
+    return this.listPaged<ZohoContact, ZohoContactsResponse>(
+      account,
+      "contacts",
+      (data) => data.contacts ?? []
+    );
   }
 
   async listInvoices(connectorAccountId: string): Promise<ZohoInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
-    const data = await this.getJson<ZohoInvoicesResponse>(
-      account,
-      "invoices"
-    );
 
-    return data.invoices ?? [];
+    return this.listPaged<ZohoInvoice, ZohoInvoicesResponse>(
+      account,
+      "invoices",
+      (data) => data.invoices ?? []
+    );
   }
 
   private async getFreshAccount(
@@ -160,28 +169,66 @@ export class ZohoApiClient {
 
   private async getJson<T>(
     account: FreshZohoAccount,
-    resource: "contacts" | "invoices"
+    resource: "contacts" | "invoices",
+    page: number
   ): Promise<T> {
     const endpoint = new URL(
       `${account.apiDomain.replace(/\/+$/, "")}/books/v3/${resource}`
     );
 
     endpoint.searchParams.set("organization_id", account.externalTenantId);
-    endpoint.searchParams.set("per_page", "200");
+    endpoint.searchParams.set("per_page", String(ZohoApiClient.pageSize));
+    endpoint.searchParams.set("page", String(page));
 
     const response = await fetchProviderRequest({
       provider: "Zoho",
       endpoint,
       init: {
-      method: "GET",
-      headers: {
-        Authorization: `Zoho-oauthtoken ${account.accessToken}`,
-        Accept: "application/json"
-      }
+        method: "GET",
+        headers: {
+          Authorization: `Zoho-oauthtoken ${account.accessToken}`,
+          Accept: "application/json"
+        }
       }
     });
 
     return (await response.json()) as T;
+  }
+
+  private async listPaged<TItem, TResponse extends { page_context?: ZohoPageContext }>(
+    account: FreshZohoAccount,
+    resource: "contacts" | "invoices",
+    extractItems: (response: TResponse) => TItem[]
+  ): Promise<TItem[]> {
+    const items: TItem[] = [];
+
+    for (let page = 1; page <= ZohoApiClient.maxPageCount; page += 1) {
+      const data = await this.getJson<TResponse>(account, resource, page);
+      const pageItems = extractItems(data);
+
+      if (pageItems.length === 0) {
+        return items;
+      }
+
+      items.push(...pageItems);
+
+      const hasMorePage = data.page_context?.has_more_page;
+      if (typeof hasMorePage === "boolean") {
+        if (!hasMorePage) {
+          return items;
+        }
+
+        continue;
+      }
+
+      if (pageItems.length < ZohoApiClient.pageSize) {
+        return items;
+      }
+    }
+
+    throw new Error(
+      `Zoho ${resource} pagination exceeded ${ZohoApiClient.maxPageCount} pages.`
+    );
   }
 
   private requireOrganizationId(value: string | null) {

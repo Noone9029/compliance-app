@@ -86,6 +86,33 @@ function mockConnectedZohoAccount(mocks: ReturnType<typeof createHarness>["mocks
   });
 }
 
+function zohoContactsPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    contact_id: `contact-${page}-${index + 1}`,
+    contact_name: `Contact ${page}-${index + 1}`
+  }));
+}
+
+function zohoInvoicesPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    invoice_id: `invoice-${page}-${index + 1}`,
+    invoice_number: `ZOHO-${page}-${index + 1}`
+  }));
+}
+
+function parsedZohoRequests(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls.map((call) => {
+    const url = new URL(String(call[0]));
+
+    return {
+      endpoint: `${url.origin}${url.pathname}`,
+      organizationId: url.searchParams.get("organization_id"),
+      perPage: url.searchParams.get("per_page"),
+      page: url.searchParams.get("page")
+    };
+  });
+}
+
 describe("zoho api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -248,6 +275,193 @@ describe("zoho api client", () => {
       /organization_id is missing/i
     );
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
+  });
+
+  it("fetches multiple contact pages and concatenates contacts", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            contacts: zohoContactsPage(1, 200)
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            contacts: zohoContactsPage(2, 1)
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_zoho_retry");
+
+    expect(contacts).toHaveLength(201);
+    expect(contacts[0]).toEqual({
+      contact_id: "contact-1-1",
+      contact_name: "Contact 1-1"
+    });
+    expect(contacts[200]).toEqual({
+      contact_id: "contact-2-1",
+      contact_name: "Contact 2-1"
+    });
+    expect(parsedZohoRequests(fetchMock)).toEqual([
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "1"
+      },
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "2"
+      }
+    ]);
+  });
+
+  it("stops contact pagination after an empty page", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          contacts: []
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_zoho_retry");
+
+    expect(contacts).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(parsedZohoRequests(fetchMock)[0]).toEqual({
+      endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+      organizationId: "zoho-org-retry",
+      perPage: "200",
+      page: "1"
+    });
+  });
+
+  it("fetches multiple invoice pages and concatenates invoices", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            invoices: zohoInvoicesPage(1, 200),
+            page_context: {
+              has_more_page: true
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            invoices: zohoInvoicesPage(2, 1),
+            page_context: {
+              has_more_page: false
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_zoho_retry");
+
+    expect(invoices).toHaveLength(201);
+    expect(invoices[0]).toEqual({
+      invoice_id: "invoice-1-1",
+      invoice_number: "ZOHO-1-1"
+    });
+    expect(invoices[200]).toEqual({
+      invoice_id: "invoice-2-1",
+      invoice_number: "ZOHO-2-1"
+    });
+    expect(parsedZohoRequests(fetchMock)).toEqual([
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/invoices",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "1"
+      },
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/invoices",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "2"
+      }
+    ]);
+  });
+
+  it("uses page_context.has_more_page=false as the pagination stop signal", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          contacts: zohoContactsPage(1, 200),
+          page_context: {
+            has_more_page: false
+          }
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_zoho_retry");
+
+    expect(contacts).toHaveLength(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws if Zoho pagination exceeds the safety page cap", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fullPage = zohoContactsPage(1, 200);
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          contacts: fullPage,
+          page_context: {
+            has_more_page: true
+          }
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.listContacts("conn_zoho_retry")).rejects.toThrow(
+      /pagination exceeded 1000 pages/i
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1000);
+    expect(parsedZohoRequests(fetchMock).at(-1)).toEqual({
+      endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+      organizationId: "zoho-org-retry",
+      perPage: "200",
+      page: "1000"
+    });
   });
 
   it("does not retry non-transient 400 provider errors", async () => {
