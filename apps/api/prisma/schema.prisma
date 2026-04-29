@@ -18,6 +18,7 @@ model User {
   authIdentities             AuthIdentity[]
   complianceEvents           ComplianceEvent[]    @relation("ComplianceEventActor")
   connectedConnectorAccounts ConnectorAccount[]   @relation("ConnectorAccountConnectedBy")
+  connectorOAuthStates       ConnectorOAuthState[]
   invoiceStatusEvents        InvoiceStatusEvent[] @relation("InvoiceStatusActor")
   memberships                Membership[]
   passwordResetTokens        PasswordResetToken[]
@@ -81,6 +82,7 @@ model Organization {
   complianceEvents        ComplianceEvent[]
   complianceOnboardings   ComplianceOnboarding[]
   connectorAccounts       ConnectorAccount[]
+  connectorOAuthStates     ConnectorOAuthState[]
   connectorSyncLogs       ConnectorSyncLog[]
   contacts                Contact[]
   contactGroups           ContactGroup[]
@@ -464,6 +466,23 @@ model ConnectorCredential {
   connectorAccount     ConnectorAccount  @relation(fields: [connectorAccountId], references: [id], onDelete: Cascade)
 
   @@index([provider, expiresAt])
+}
+
+model ConnectorOAuthState {
+  id             String            @id @default(cuid())
+  organizationId String
+  userId         String
+  provider       ConnectorProvider
+  nonceHash      String            @unique
+  issuedAt       DateTime
+  expiresAt      DateTime
+  consumedAt     DateTime?
+  createdAt      DateTime          @default(now())
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, userId, provider, expiresAt])
+  @@index([expiresAt])
 }
 
 model ConnectorSyncLog {

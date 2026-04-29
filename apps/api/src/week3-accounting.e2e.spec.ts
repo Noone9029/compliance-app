@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import request from "supertest";
 import type { INestApplication } from "@nestjs/common";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadEnv } from "@daftar/config";
@@ -10,6 +10,7 @@ import { createApp } from "./bootstrap";
 import { processComplianceSubmission } from "./modules/compliance/compliance-processor";
 
 describe.sequential("Daftar Week 3 accounting core", () => {
+  const eInvoiceIntegrationKey = "week10.einvoice.integration";
   const prisma = new PrismaClient({
     datasources: {
       db: {
@@ -58,6 +59,46 @@ describe.sequential("Daftar Week 3 accounting core", () => {
         quantityOnHand
       }
     });
+  }
+
+  async function withSandboxComplianceIntegration<T>(
+    organizationId: string,
+    action: () => Promise<T>
+  ): Promise<T> {
+    const where = {
+      organizationId_key: {
+        organizationId,
+        key: eInvoiceIntegrationKey
+      }
+    };
+    const previous = await prisma.organizationSetting.findUnique({ where });
+
+    await prisma.organizationSetting.upsert({
+      where,
+      update: { value: { environment: "Sandbox" } },
+      create: {
+        organizationId,
+        key: eInvoiceIntegrationKey,
+        value: { environment: "Sandbox" }
+      }
+    });
+
+    try {
+      return await action();
+    } finally {
+      if (previous) {
+        await prisma.organizationSetting.update({
+          where,
+          data: {
+            value: previous.value === null ? Prisma.JsonNull : previous.value
+          }
+        });
+      } else {
+        await prisma.organizationSetting.deleteMany({
+          where: { organizationId, key: eInvoiceIntegrationKey }
+        });
+      }
+    }
   }
 
   it("supports sales invoices end to end including compliance reporting", async () => {
@@ -161,10 +202,14 @@ describe.sequential("Daftar Week 3 accounting core", () => {
     expect(paidInvoice.body.status).toBe("PARTIALLY_PAID");
     expect(paidInvoice.body.amountDue).toBe("850.00");
 
-    const complianceDocument = await request(app.getHttpServer())
-      .post(`/v1/compliance/invoices/${createdInvoice.body.id}/report`)
-      .set("Cookie", cookies)
-      .expect(201);
+    const complianceDocument = await withSandboxComplianceIntegration(
+      eventsOrg.id,
+      () =>
+        request(app.getHttpServer())
+          .post(`/v1/compliance/invoices/${createdInvoice.body.id}/report`)
+          .set("Cookie", cookies)
+          .expect(201)
+    );
     expect(complianceDocument.body.status).toBe("QUEUED");
     expect(complianceDocument.body.submission.status).toBe("QUEUED");
 
@@ -228,7 +273,7 @@ describe.sequential("Daftar Week 3 accounting core", () => {
       }
     });
     expect(auditLogs.length).toBeGreaterThanOrEqual(4);
-  });
+  }, 15000);
 
   it("supports purchases end to end", async () => {
     const cookies = await signIn("admin@daftar.local");

@@ -20,7 +20,8 @@ import { ZohoApiClient } from "./zoho.api";
 import {
   createConnectorNonce,
   decodeConnectorState,
-  encodeConnectorState
+  encodeConnectorState,
+  hashConnectorSecret
 } from "./connector-state";
 
 import type {
@@ -86,12 +87,24 @@ export class ConnectorsService {
     redirectUri: string;
   }) {
     const transport = this.getTransport(input.provider);
-
+    const nonce = createConnectorNonce();
     const state = encodeConnectorState({
       organizationId: input.organizationId,
       userId: input.userId,
       provider: input.provider,
-      nonce: createConnectorNonce()
+      nonce
+    });
+    const decoded = decodeConnectorState(state);
+
+    await this.prisma.connectorOAuthState.create({
+      data: {
+        organizationId: input.organizationId,
+        userId: input.userId,
+        provider: input.provider,
+        nonceHash: hashConnectorSecret(nonce),
+        issuedAt: new Date(decoded.issuedAt),
+        expiresAt: new Date(decoded.expiresAt)
+      }
     });
 
     return transport.buildAuthorizationUrl({
@@ -111,7 +124,15 @@ export class ConnectorsService {
     redirectUri: string;
     externalTenantId?: string | null;
   }) {
-    const decoded = decodeConnectorState(input.state);
+    let decoded: ReturnType<typeof decodeConnectorState>;
+
+    try {
+      decoded = decodeConnectorState(input.state);
+    } catch (error) {
+      throw new BadRequestException(
+        this.errorMessage(error, "Invalid connector state")
+      );
+    }
 
     if (
       decoded.organizationId !== input.organizationId ||
@@ -129,6 +150,8 @@ export class ConnectorsService {
         "QuickBooks callback is missing realmId. Reconnect and include realmId from the provider callback."
       );
     }
+
+    await this.consumeConnectorState(decoded);
 
     const tokens = await transport.exchangeAuthorizationCode({
       organizationId: input.organizationId,
@@ -1250,5 +1273,28 @@ export class ConnectorsService {
     });
 
     return Boolean(credential);
+  }
+
+  private async consumeConnectorState(state: ReturnType<typeof decodeConnectorState>) {
+    const consumedAt = new Date();
+    const result = await this.prisma.connectorOAuthState.updateMany({
+      where: {
+        organizationId: state.organizationId,
+        userId: state.userId,
+        provider: state.provider,
+        nonceHash: hashConnectorSecret(state.nonce),
+        consumedAt: null,
+        expiresAt: {
+          gt: consumedAt
+        }
+      },
+      data: {
+        consumedAt
+      }
+    });
+
+    if (result.count !== 1) {
+      throw new BadRequestException("Invalid or already used connector state");
+    }
   }
 }

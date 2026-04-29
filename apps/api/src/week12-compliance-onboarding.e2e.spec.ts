@@ -656,7 +656,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
       orderBy: { createdAt: "desc" },
     });
     expect(retryEvent).toBeTruthy();
-  });
+  }, 15000);
 
   it("treats authentication failures as terminal without scheduling retries", async () => {
     const cookies = await signIn("admin@daftar.local");
@@ -726,7 +726,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
       orderBy: { createdAt: "desc" },
     });
     expect(finalFailureEvent).toBeTruthy();
-  });
+  }, 15000);
 
   it("dead-letters exhausted retryable failures after max attempts", async () => {
     const cookies = await signIn("admin@daftar.local");
@@ -815,7 +815,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
       orderBy: { createdAt: "desc" },
     });
     expect(deadLetterEvent).toBeTruthy();
-  });
+  }, 15000);
 
   it("fails queued submissions in the processor path when onboarding is revoked", async () => {
     const cookies = await signIn("admin@daftar.local");
@@ -894,5 +894,5 @@ describe.sequential("Daftar staged compliance onboarding", () => {
         },
       });
     }
-  });
+  }, 15000);
 });

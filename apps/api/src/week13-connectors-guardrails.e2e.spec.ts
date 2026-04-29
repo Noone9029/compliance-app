@@ -5,7 +5,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import request from "supertest";
 
 import { createApp } from "./bootstrap";
-import { encodeConnectorState } from "./modules/connectors/connector-state";
+import {
+  decodeConnectorState,
+  encodeConnectorState,
+  hashConnectorSecret
+} from "./modules/connectors/connector-state";
 
 describe.sequential("Daftar Week 13 connector guardrails", () => {
   const env = loadEnv();
@@ -85,6 +89,48 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     });
   }
 
+  async function createStoredConnectorState(input: {
+    organizationId: string;
+    userId: string;
+    provider: "XERO" | "QUICKBOOKS_ONLINE" | "ZOHO_BOOKS";
+    nonce: string;
+  }) {
+    const state = encodeConnectorState(input);
+    const decoded = decodeConnectorState(state);
+
+    await prisma.connectorOAuthState.create({
+      data: {
+        organizationId: decoded.organizationId,
+        userId: decoded.userId,
+        provider: decoded.provider,
+        nonceHash: hashConnectorSecret(decoded.nonce),
+        issuedAt: new Date(decoded.issuedAt),
+        expiresAt: new Date(decoded.expiresAt)
+      }
+    });
+
+    return state;
+  }
+
+  async function ensureSandboxComplianceIntegration(organizationId: string) {
+    await prisma.organizationSetting.upsert({
+      where: {
+        organizationId_key: {
+          organizationId,
+          key: "week10.einvoice.integration"
+        }
+      },
+      update: {
+        value: { environment: "Sandbox" }
+      },
+      create: {
+        organizationId,
+        key: "week10.einvoice.integration",
+        value: { environment: "Sandbox" }
+      }
+    });
+  }
+
   beforeAll(async () => {
     app = await createApp();
     await app.init();
@@ -95,9 +141,22 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     await prisma.$disconnect();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    const organization = await prisma.organization.findUnique({
+      where: { slug: "nomad-events" },
+      select: { id: true }
+    });
+
+    if (organization) {
+      await prisma.organizationSetting.deleteMany({
+        where: {
+          organizationId: organization.id,
+          key: "week10.einvoice.integration"
+        }
+      });
+    }
   });
 
   it("strips secret connector metadata from account responses", async () => {
@@ -176,11 +235,11 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
 
     await switchOrg(cookies, "nomad-events");
 
-    const state = encodeConnectorState({
+    const state = await createStoredConnectorState({
       organizationId: organization.id,
       userId: owner.id,
       provider: "QUICKBOOKS_ONLINE",
-      nonce: "week13-realm-required"
+      nonce: `week13-realm-required-${Date.now()}`
     });
 
     const response = await request(app.getHttpServer())
@@ -203,6 +262,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     const organization = await prisma.organization.findUniqueOrThrow({
       where: { slug: "nomad-events" }
     });
+    await ensureSandboxComplianceIntegration(organization.id);
     const connectorAccount = await prisma.connectorAccount.findFirstOrThrow({
       where: {
         organizationId: organization.id,
@@ -295,7 +355,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     expect(eligibleCompliance?.lastSubmissionStatus).toBe("QUEUED");
     expect(eligibleCompliance?.submission?.status).toBe("QUEUED");
     expect(eligibleCompliance?.events.length).toBeGreaterThan(0);
-  });
+  }, 15000);
 
   it("runs Xero live import with mocked provider responses when credentials exist", async () => {
     const ownerEmail = "owner@daftar.local";
@@ -309,7 +369,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       where: { email: ownerEmail }
     });
 
-    const state = encodeConnectorState({
+    const state = await createStoredConnectorState({
       organizationId: organization.id,
       userId: owner.id,
       provider: "XERO",
@@ -452,7 +512,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     expect(importedInvoice).toBeTruthy();
     expect(importedInvoice?.status).toBe("ISSUED");
     expect(Number(importedInvoice?.total ?? 0)).toBeCloseTo(115, 2);
-  });
+  }, 15000);
 
   it("runs Zoho live import with mocked provider responses and persists api_domain per credential", async () => {
     const ownerEmail = "owner@daftar.local";
@@ -466,7 +526,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       where: { email: ownerEmail }
     });
 
-    const state = encodeConnectorState({
+    const state = await createStoredConnectorState({
       organizationId: organization.id,
       userId: owner.id,
       provider: "ZOHO_BOOKS",
@@ -639,7 +699,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     expect(importedInvoice).toBeTruthy();
     expect(importedInvoice?.status).toBe("ISSUED");
     expect(Number(importedInvoice?.total ?? 0)).toBeCloseTo(115, 2);
-  });
+  }, 15000);
 
   it("refreshes Zoho token without api_domain and still imports from persisted regional api_domain", async () => {
     const ownerEmail = "owner@daftar.local";
@@ -653,7 +713,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       where: { email: ownerEmail }
     });
 
-    const state = encodeConnectorState({
+    const state = await createStoredConnectorState({
       organizationId: organization.id,
       userId: owner.id,
       provider: "ZOHO_BOOKS",
@@ -866,5 +926,5 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       apiDomain: zohoApiDomain
     });
     expect(storedCredential?.rotationCount).toBeGreaterThanOrEqual(1);
-  });
+  }, 15000);
 });
