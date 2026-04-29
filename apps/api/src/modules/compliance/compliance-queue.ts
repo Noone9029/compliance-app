@@ -1,4 +1,4 @@
-import { Queue } from "bullmq";
+import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
 import { loadEnv, queueNames } from "@daftar/config";
@@ -14,6 +14,24 @@ export type ComplianceDeadLetterQueueJob = {
   attemptNumber: number;
   failedAt: string;
 };
+
+export const complianceSubmissionJobName = "compliance.submit";
+
+export function complianceSubmissionJobId(submissionId: string) {
+  return `${complianceSubmissionJobName}-${submissionId}`;
+}
+
+export function complianceSubmissionJobOptions(input: {
+  submissionId: string;
+  delayMs?: number;
+}): JobsOptions {
+  return {
+    jobId: complianceSubmissionJobId(input.submissionId),
+    delay: input.delayMs ?? 0,
+    removeOnComplete: 50,
+    removeOnFail: 50,
+  };
+}
 
 export function createComplianceQueueConnection(redisUrl = loadEnv().REDIS_URL) {
   return new IORedis(redisUrl, {
@@ -46,15 +64,14 @@ export async function enqueueComplianceSubmission(input: {
 
   try {
     await queue.add(
-      "compliance.submit",
+      complianceSubmissionJobName,
       {
         submissionId: input.submissionId,
       },
-      {
-        delay: input.delayMs ?? 0,
-        removeOnComplete: 50,
-        removeOnFail: 50,
-      },
+      complianceSubmissionJobOptions({
+        submissionId: input.submissionId,
+        delayMs: input.delayMs,
+      }),
     );
   } finally {
     if (!input.queue) {
