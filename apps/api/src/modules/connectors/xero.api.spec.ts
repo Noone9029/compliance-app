@@ -48,6 +48,41 @@ function createHarness() {
   };
 }
 
+function providerResponse(input: {
+  ok: boolean;
+  status?: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}) {
+  return {
+    ok: input.ok,
+    status: input.status ?? (input.ok ? 200 : 500),
+    headers: new Headers(input.headers),
+    json: async () => input.body,
+    text: async () =>
+      typeof input.body === "string" ? input.body : JSON.stringify(input.body)
+  };
+}
+
+function mockConnectedXeroAccount(mocks: ReturnType<typeof createHarness>["mocks"]) {
+  mocks.findUnique.mockResolvedValue({
+    id: "conn_xero_retry",
+    provider: "XERO",
+    externalTenantId: "tenant-retry-1"
+  });
+  mocks.getDecryptedCredentials.mockResolvedValue({
+    connectorAccountId: "conn_xero_retry",
+    provider: "XERO",
+    accessToken: "xero-access-retry",
+    refreshToken: "xero-refresh-retry",
+    expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+    tokenType: "Bearer",
+    scopes: ["accounting.contacts"],
+    rotationCount: 0,
+    lastRotatedAt: null
+  });
+}
+
 describe("xero api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -198,6 +233,57 @@ describe("xero api client", () => {
       /tenantId is missing/i
     );
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
+  });
+
+  it("retries 429 responses with Retry-After before returning contacts", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: false,
+          status: 429,
+          body: "rate limited",
+          headers: { "Retry-After": "0" }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: [{ ContactID: "contact-1", Name: "Retry Customer" }]
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_xero_retry");
+
+    expect(contacts).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws a provider-specific error after transient retries are exhausted", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: false,
+        status: 503,
+        body: "provider unavailable",
+        headers: { "Retry-After": "0" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.listContacts("conn_xero_retry")).rejects.toThrow(
+      /Xero API request failed: 503 provider unavailable/
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("uses a single refresh operation for concurrent requests on the same connector account", async () => {

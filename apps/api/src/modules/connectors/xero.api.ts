@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { ConnectorCredentialsService } from "./connector-credentials.service";
+import { fetchProviderRequest } from "./provider-request";
 import { XeroTransport } from "./xero.transport";
 
 type XeroContact = {
@@ -161,19 +162,18 @@ export class XeroApiClient {
   ): Promise<T> {
     const endpoint = `https://api.xero.com/api.xro/2.0/${path}`;
 
-    const response = await fetch(endpoint, {
+    const response = await fetchProviderRequest({
+      provider: "Xero",
+      endpoint,
+      init: {
       method: "GET",
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json",
         "xero-tenant-id": tenantId
       }
+      }
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Xero API request failed: ${response.status} ${text}`);
-    }
 
     return (await response.json()) as T;
   }

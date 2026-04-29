@@ -48,6 +48,44 @@ function createHarness() {
   };
 }
 
+function providerResponse(input: {
+  ok: boolean;
+  status?: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}) {
+  return {
+    ok: input.ok,
+    status: input.status ?? (input.ok ? 200 : 500),
+    headers: new Headers(input.headers),
+    json: async () => input.body,
+    text: async () =>
+      typeof input.body === "string" ? input.body : JSON.stringify(input.body)
+  };
+}
+
+function mockConnectedZohoAccount(mocks: ReturnType<typeof createHarness>["mocks"]) {
+  mocks.findUnique.mockResolvedValue({
+    id: "conn_zoho_retry",
+    provider: "ZOHO_BOOKS",
+    externalTenantId: "zoho-org-retry"
+  });
+  mocks.getDecryptedCredentials.mockResolvedValue({
+    connectorAccountId: "conn_zoho_retry",
+    provider: "ZOHO_BOOKS",
+    accessToken: "zoho-access-retry",
+    refreshToken: "zoho-refresh-retry",
+    expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+    tokenType: "Bearer",
+    scopes: ["ZohoBooks.fullaccess.all"],
+    credentialMetadata: {
+      apiDomain: "https://www.zohoapis.eu"
+    },
+    rotationCount: 0,
+    lastRotatedAt: null
+  });
+}
+
 describe("zoho api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -210,6 +248,25 @@ describe("zoho api client", () => {
       /organization_id is missing/i
     );
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
+  });
+
+  it("does not retry non-transient 400 provider errors", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: false,
+        status: 400,
+        body: "bad request"
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.listContacts("conn_zoho_retry")).rejects.toThrow(
+      /Zoho API request failed: 400 bad request/
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("uses a single refresh operation for concurrent requests on the same connector account", async () => {

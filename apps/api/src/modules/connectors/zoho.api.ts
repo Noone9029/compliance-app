@@ -5,6 +5,7 @@ import {
   ConnectorCredentialsService,
   type ConnectorCredentialMetadata
 } from "./connector-credentials.service";
+import { fetchProviderRequest } from "./provider-request";
 import { ZohoTransport } from "./zoho.transport";
 
 type ZohoContact = {
@@ -168,18 +169,17 @@ export class ZohoApiClient {
     endpoint.searchParams.set("organization_id", account.externalTenantId);
     endpoint.searchParams.set("per_page", "200");
 
-    const response = await fetch(endpoint, {
+    const response = await fetchProviderRequest({
+      provider: "Zoho",
+      endpoint,
+      init: {
       method: "GET",
       headers: {
         Authorization: `Zoho-oauthtoken ${account.accessToken}`,
         Accept: "application/json"
       }
+      }
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Zoho API request failed: ${response.status} ${text}`);
-    }
 
     return (await response.json()) as T;
   }

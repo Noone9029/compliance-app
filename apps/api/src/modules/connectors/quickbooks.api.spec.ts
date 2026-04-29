@@ -48,6 +48,43 @@ function createHarness() {
   };
 }
 
+function providerResponse(input: {
+  ok: boolean;
+  status?: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}) {
+  return {
+    ok: input.ok,
+    status: input.status ?? (input.ok ? 200 : 500),
+    headers: new Headers(input.headers),
+    json: async () => input.body,
+    text: async () =>
+      typeof input.body === "string" ? input.body : JSON.stringify(input.body)
+  };
+}
+
+function mockConnectedQuickBooksAccount(
+  mocks: ReturnType<typeof createHarness>["mocks"]
+) {
+  mocks.findUnique.mockResolvedValue({
+    id: "conn_qbo_retry",
+    provider: "QUICKBOOKS_ONLINE",
+    externalTenantId: "realm-retry-1"
+  });
+  mocks.getDecryptedCredentials.mockResolvedValue({
+    connectorAccountId: "conn_qbo_retry",
+    provider: "QUICKBOOKS_ONLINE",
+    accessToken: "qbo-access-retry",
+    refreshToken: "qbo-refresh-retry",
+    expiresAt: new Date("2099-01-01T00:00:00.000Z"),
+    tokenType: "bearer",
+    scopes: ["customers.read"],
+    rotationCount: 0,
+    lastRotatedAt: null
+  });
+}
+
 describe("quickbooks api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -184,6 +221,38 @@ describe("quickbooks api client", () => {
     await expect(api.listCustomers("conn_legacy")).rejects.toThrow(/missing/i);
     expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
     expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("retries 503 responses without Retry-After before returning invoices", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: false,
+          status: 503,
+          body: "service unavailable"
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Invoice: [{ Id: "invoice-1", DocNumber: "QBO-1" }]
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_qbo_retry");
+
+    expect(invoices).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("uses a single refresh operation for concurrent requests on the same connector account", async () => {

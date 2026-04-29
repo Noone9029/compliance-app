@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { QuickBooksTransport } from "./quickbooks.transport";
 import { ConnectorCredentialsService } from "./connector-credentials.service";
+import { fetchProviderRequest } from "./provider-request";
 
 type QuickBooksCustomer = {
   Id: string;
@@ -163,18 +164,17 @@ export class QuickBooksApiClient {
       realmId
     )}/query?query=${encodeURIComponent(statement)}`;
 
-    const response = await fetch(endpoint, {
+    const response = await fetchProviderRequest({
+      provider: "QuickBooks",
+      endpoint,
+      init: {
       method: "GET",
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: "application/json"
       }
+      }
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`QuickBooks query failed: ${response.status} ${text}`);
-    }
 
     return (await response.json()) as QuickBooksQueryResponse<T>;
   }
