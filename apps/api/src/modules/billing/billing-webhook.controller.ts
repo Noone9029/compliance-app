@@ -1,4 +1,13 @@
-import { Body, Controller, Headers, Inject, Post } from "@nestjs/common";
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Headers,
+  Inject,
+  Post,
+  Req
+} from "@nestjs/common";
+import type { Request } from "express";
 import { billingPlanCodes, billingSubscriptionStatuses } from "@daftar/types";
 import { z } from "zod";
 
@@ -56,10 +65,27 @@ export class BillingWebhookController {
   @Post("stripe")
   async handleStripeWebhook(
     @Headers("x-stripe-signature") signature: string | undefined,
-    @Body() body: unknown
+    @Body() body: unknown,
+    @Req() request: Request & { rawBody?: Buffer }
   ) {
-    const parsed = billingWebhookSchema.parse(body);
-    const result = await this.billingService.handleStripeWebhook(signature, parsed);
+    const rawBody = Buffer.isBuffer(request.body) ? request.body : request.rawBody;
+    if (!rawBody) {
+      throw new BadRequestException("Raw Stripe webhook payload is required.");
+    }
+    let decodedBody = body;
+    if (Buffer.isBuffer(body)) {
+      try {
+        decodedBody = JSON.parse(rawBody.toString("utf8"));
+      } catch {
+        throw new BadRequestException("Invalid Stripe webhook payload.");
+      }
+    }
+    const parsed = billingWebhookSchema.parse(decodedBody);
+    const result = await this.billingService.handleStripeWebhook(
+      signature,
+      rawBody,
+      parsed
+    );
     await this.auditService.log({
       organizationId: result.organizationId,
       actorType: "SYSTEM",

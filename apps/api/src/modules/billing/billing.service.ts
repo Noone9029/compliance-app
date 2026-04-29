@@ -1,10 +1,11 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, UnauthorizedException } from "@nestjs/common";
 import type {
   BillingInvoiceRecord,
   BillingPlanRecord,
   BillingSummaryRecord
 } from "@daftar/types";
 import { billingPlanCodes } from "@daftar/types";
+import Stripe from "stripe";
 
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { loadEnv } from "@daftar/config";
@@ -42,6 +43,8 @@ const billingPlans: BillingPlanRecord[] = [
     addOns: ["Extra seats", "Priority support", "Connector governance"]
   }
 ];
+
+const stripe = new Stripe("sk_test_webhook_verification_only");
 
 @Injectable()
 export class BillingService {
@@ -312,6 +315,7 @@ export class BillingService {
 
   async handleStripeWebhook(
     signature: string | null | undefined,
+    rawBody: Buffer,
     payload: {
       type:
         | "customer.subscription.created"
@@ -345,8 +349,14 @@ export class BillingService {
     }
   ) {
     const env = loadEnv();
-    if (!signature || signature !== env.STRIPE_WEBHOOK_SECRET) {
-      throw new Error("Invalid Stripe webhook signature.");
+    if (!signature) {
+      throw new UnauthorizedException("Missing Stripe webhook signature.");
+    }
+
+    try {
+      stripe.webhooks.constructEvent(rawBody, signature, env.STRIPE_WEBHOOK_SECRET);
+    } catch {
+      throw new UnauthorizedException("Invalid Stripe webhook signature.");
     }
 
     const organizationId = await this.resolveWebhookOrganizationId(payload.data);

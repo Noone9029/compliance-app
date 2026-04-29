@@ -1,6 +1,7 @@
 import request from "supertest";
 import type { INestApplication } from "@nestjs/common";
 import { PrismaClient } from "@prisma/client";
+import Stripe from "stripe";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { loadEnv } from "@daftar/config";
@@ -9,6 +10,7 @@ import { encodeConnectorState } from "./modules/connectors/connector-state";
 
 describe.sequential("Daftar Week 4 release blockers", () => {
   const env = loadEnv();
+  const stripe = new Stripe("sk_test_webhook_signing_only");
   const prisma = new PrismaClient({
     datasources: {
       db: {
@@ -34,6 +36,17 @@ describe.sequential("Daftar Week 4 release blockers", () => {
       .set("Cookie", cookies)
       .send({ orgSlug })
       .expect(201);
+  }
+
+  function signedStripePayload(payload: unknown) {
+    const rawPayload = JSON.stringify(payload);
+    return {
+      rawPayload,
+      signature: stripe.webhooks.generateTestHeaderString({
+        payload: rawPayload,
+        secret: env.STRIPE_WEBHOOK_SECRET
+      })
+    };
   }
 
   beforeAll(async () => {
@@ -221,80 +234,105 @@ describe.sequential("Daftar Week 4 release blockers", () => {
       })
       .expect(409);
 
+    const subscriptionUpdatedPayload = signedStripePayload({
+      type: "customer.subscription.updated",
+      data: {
+        organizationId: labsOrg.id,
+        stripeCustomerId: "cus_NL_release",
+        stripeSubscriptionId: "sub_NL_release",
+        billingEmail: "finance@nomad-labs.example",
+        planCode: "SCALE",
+        status: "ACTIVE",
+        seats: 8,
+        currentPeriodStart: "2026-06-01T00:00:00.000Z",
+        currentPeriodEnd: "2026-06-30T23:59:59.000Z",
+        cancelAtPeriodEnd: false
+      }
+    });
+
     const webhookUpdated = await request(app.getHttpServer())
       .post("/v1/billing/webhooks/stripe")
-      .set("x-stripe-signature", env.STRIPE_WEBHOOK_SECRET)
-      .send({
-        type: "customer.subscription.updated",
-        data: {
-          organizationId: labsOrg.id,
-          stripeCustomerId: "cus_NL_release",
-          stripeSubscriptionId: "sub_NL_release",
-          billingEmail: "finance@nomad-labs.example",
-          planCode: "SCALE",
-          status: "ACTIVE",
-          seats: 8,
-          currentPeriodStart: "2026-06-01T00:00:00.000Z",
-          currentPeriodEnd: "2026-06-30T23:59:59.000Z",
-          cancelAtPeriodEnd: false
-        }
-      })
+      .set("content-type", "application/json")
+      .set("x-stripe-signature", subscriptionUpdatedPayload.signature)
+      .send(subscriptionUpdatedPayload.rawPayload)
       .expect(201);
     expect(webhookUpdated.body.status).toBe("ACTIVE");
 
     await request(app.getHttpServer())
       .post("/v1/billing/webhooks/stripe")
-      .set("x-stripe-signature", env.STRIPE_WEBHOOK_SECRET)
-      .send({
-        type: "invoice.payment_failed",
-        data: {
-          stripeSubscriptionId: "sub_NL_release",
-          invoice: {
-            stripeInvoiceId: "in_NL_release_1",
-            invoiceNumber: "SUB-NL-REL-0001",
-            status: "open",
-            total: "199.00",
-            currencyCode: "USD",
-            issuedAt: "2026-06-01T00:00:00.000Z",
-            dueAt: "2026-06-05T00:00:00.000Z",
-            hostedInvoiceUrl: "https://billing.daftar.local/sub-nl-rel-0001"
-          }
-        }
-      })
-      .expect(201);
-
-    const webhookPaid = await request(app.getHttpServer())
-      .post("/v1/billing/webhooks/stripe")
-      .set("x-stripe-signature", env.STRIPE_WEBHOOK_SECRET)
-      .send({
-        type: "invoice.paid",
-        data: {
-          stripeSubscriptionId: "sub_NL_release",
-          invoice: {
-            stripeInvoiceId: "in_NL_release_1",
-            invoiceNumber: "SUB-NL-REL-0001",
-            status: "paid",
-            total: "199.00",
-            currencyCode: "USD",
-            issuedAt: "2026-06-01T00:00:00.000Z",
-            dueAt: "2026-06-05T00:00:00.000Z",
-            paidAt: "2026-06-03T00:00:00.000Z",
-            hostedInvoiceUrl: "https://billing.daftar.local/sub-nl-rel-0001"
-          }
-        }
-      })
-      .expect(201);
-    expect(webhookPaid.body.status).toBe("ACTIVE");
+      .set("content-type", "application/json")
+      .set("x-stripe-signature", "t=1,v1=invalid")
+      .send(subscriptionUpdatedPayload.rawPayload)
+      .expect(401);
 
     await request(app.getHttpServer())
       .post("/v1/billing/webhooks/stripe")
-      .set("x-stripe-signature", env.STRIPE_WEBHOOK_SECRET)
-      .send({
-        type: "customer.subscription.deleted",
-        data: {
-          stripeSubscriptionId: "sub_NL_release"
+      .set("content-type", "application/json")
+      .send(subscriptionUpdatedPayload.rawPayload)
+      .expect(401);
+
+    const invoiceFailedPayload = signedStripePayload({
+      type: "invoice.payment_failed",
+      data: {
+        stripeSubscriptionId: "sub_NL_release",
+        invoice: {
+          stripeInvoiceId: "in_NL_release_1",
+          invoiceNumber: "SUB-NL-REL-0001",
+          status: "open",
+          total: "199.00",
+          currencyCode: "USD",
+          issuedAt: "2026-06-01T00:00:00.000Z",
+          dueAt: "2026-06-05T00:00:00.000Z",
+          hostedInvoiceUrl: "https://billing.daftar.local/sub-nl-rel-0001"
         }
-      })
+      }
+    });
+
+    await request(app.getHttpServer())
+      .post("/v1/billing/webhooks/stripe")
+      .set("content-type", "application/json")
+      .set("x-stripe-signature", invoiceFailedPayload.signature)
+      .send(invoiceFailedPayload.rawPayload)
+      .expect(201);
+
+    const invoicePaidPayload = signedStripePayload({
+      type: "invoice.paid",
+      data: {
+        stripeSubscriptionId: "sub_NL_release",
+        invoice: {
+          stripeInvoiceId: "in_NL_release_1",
+          invoiceNumber: "SUB-NL-REL-0001",
+          status: "paid",
+          total: "199.00",
+          currencyCode: "USD",
+          issuedAt: "2026-06-01T00:00:00.000Z",
+          dueAt: "2026-06-05T00:00:00.000Z",
+          paidAt: "2026-06-03T00:00:00.000Z",
+          hostedInvoiceUrl: "https://billing.daftar.local/sub-nl-rel-0001"
+        }
+      }
+    });
+
+    const webhookPaid = await request(app.getHttpServer())
+      .post("/v1/billing/webhooks/stripe")
+      .set("content-type", "application/json")
+      .set("x-stripe-signature", invoicePaidPayload.signature)
+      .send(invoicePaidPayload.rawPayload)
+      .expect(201);
+    expect(webhookPaid.body.status).toBe("ACTIVE");
+
+    const subscriptionDeletedPayload = signedStripePayload({
+      type: "customer.subscription.deleted",
+      data: {
+        stripeSubscriptionId: "sub_NL_release"
+      }
+    });
+
+    await request(app.getHttpServer())
+      .post("/v1/billing/webhooks/stripe")
+      .set("content-type", "application/json")
+      .set("x-stripe-signature", subscriptionDeletedPayload.signature)
+      .send(subscriptionDeletedPayload.rawPayload)
       .expect(201);
 
     const labsSummary = await request(app.getHttpServer())
