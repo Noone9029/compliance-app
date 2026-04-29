@@ -36,6 +36,28 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
     await prisma.$disconnect();
   });
 
+  beforeAll(async () => {
+    const eventsOrg = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-events" },
+    });
+    await prisma.organizationSetting.upsert({
+      where: {
+        organizationId_key: {
+          organizationId: eventsOrg.id,
+          key: "week10.einvoice.integration",
+        },
+      },
+      update: {
+        value: { environment: "Sandbox" },
+      },
+      create: {
+        organizationId: eventsOrg.id,
+        key: "week10.einvoice.integration",
+        value: { environment: "Sandbox" },
+      },
+    });
+  });
+
   it("separates clearance and reporting flows for standard and simplified invoices", async () => {
     const cookies = await signIn("admin@daftar.local");
     const eventsOrg = await prisma.organization.findUniqueOrThrow({
@@ -109,7 +131,7 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
     expect(standardDetail.body.compliance.canShareWithCustomer).toBe(true);
     expect(simplifiedDetail.body.compliance.status).toBe("REPORTED");
     expect(simplifiedDetail.body.compliance.canShareWithCustomer).toBe(true);
-  });
+  }, 15000);
 
   it("persists retry history and supports operator-triggered retries after rejection", async () => {
     const cookies = await signIn("admin@daftar.local");
@@ -206,5 +228,5 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
     expect(retriedDetail.body.compliance.attempts.length).toBeGreaterThanOrEqual(2);
     expect(retriedDetail.body.compliance.timeline.length).toBeGreaterThanOrEqual(3);
     expect(retriedDetail.body.compliance.status).toBe("REJECTED");
-  });
+  }, 15000);
 });

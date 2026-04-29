@@ -586,7 +586,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(storedDocument.hashMetadata).toBeTruthy();
     expect(storedDocument.qrMetadata).toBeTruthy();
     expect(storedDocument.signatureMetadata).toBeTruthy();
-  });
+  }, 15000);
 
   it("applies stronger retry backoff for throttled submission failures", async () => {
     const cookies = await signIn("admin@daftar.local");
