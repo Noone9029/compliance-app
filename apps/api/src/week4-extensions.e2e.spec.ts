@@ -336,20 +336,19 @@ describe.sequential("Daftar Week 4 extensions", () => {
     const preview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
       .set("Cookie", cookies)
-      .expect(200);
-    expect(preview.body.organizationId).toBe(eventsOrg.id);
-    expect(preview.body.connectorAccountId).toBe(xeroAccount.id);
-    expect(preview.body.scope).toBeNull();
-    expect(String(preview.body.message)).toMatch(/not implemented/i);
+      .expect(501);
+    expect(String(preview.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
 
     const syncResult = await request(app.getHttpServer())
       .post(`/v1/connectors/accounts/${xeroAccount.id}/sync`)
       .set("Cookie", cookies)
       .send({ direction: "EXPORT", scope: "contacts,invoices,bills,quotes" })
-      .expect(201);
-    expect(syncResult.body.connectorAccountId).toBe(xeroAccount.id);
-    expect(syncResult.body.scope).toBe("contacts,invoices,bills,quotes");
-    expect(String(syncResult.body.message)).toMatch(/not implemented/i);
+      .expect(501);
+    expect(String(syncResult.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
 
     const billingSummaryBefore = await request(app.getHttpServer())
       .get("/v1/billing/summary")

@@ -1,4 +1,4 @@
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, NotImplementedException } from "@nestjs/common";
 import type { ConnectorProvider } from "@daftar/types";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -65,14 +65,17 @@ function createServiceHarness() {
   };
   const xeroAdapter = {
     provider: "XERO",
+    buildExportPreview: vi.fn(),
     mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
   };
   const quickBooksAdapter = {
     provider: "QUICKBOOKS_ONLINE",
+    buildExportPreview: vi.fn(),
     mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
   };
   const zohoAdapter = {
     provider: "ZOHO_BOOKS",
+    buildExportPreview: vi.fn(),
     mapLiveImportPayload: vi.fn(() => ({ contacts: [], invoices: [] })),
   };
   const quickBooksApiClient = {
@@ -462,6 +465,62 @@ describe("connectors service", () => {
     expect(mocks.quickBooksTransport.exchangeAuthorizationCode).not.toHaveBeenCalled();
     expect(mocks.consumeOAuthState).not.toHaveBeenCalled();
     expect(mocks.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects export preview with NotImplementedException after validating account ownership", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO");
+
+    await expect(service.getExportPreview("org_1", "conn_1")).rejects.toThrow(
+      NotImplementedException,
+    );
+    await expect(service.getExportPreview("org_1", "conn_1")).rejects.toThrow(
+      "Connector exports are not implemented yet.",
+    );
+
+    expect(mocks.findFirstConnectorAccount).toHaveBeenCalledWith({
+      where: {
+        id: "conn_1",
+        organizationId: "org_1",
+      },
+    });
+    expect(mocks.xeroAdapter.buildExportPreview).not.toHaveBeenCalled();
+    expect(mocks.createSyncLog).not.toHaveBeenCalled();
+  });
+
+  it("keeps missing connector accounts on export preview from reaching export 501", async () => {
+    const { service, mocks } = createServiceHarness();
+    mocks.findFirstConnectorAccount.mockResolvedValue(null);
+
+    await expect(service.getExportPreview("org_1", "missing_conn")).rejects.toThrow(
+      /connector account not found/i,
+    );
+
+    expect(mocks.xeroAdapter.buildExportPreview).not.toHaveBeenCalled();
+    expect(mocks.quickBooksAdapter.buildExportPreview).not.toHaveBeenCalled();
+    expect(mocks.zohoAdapter.buildExportPreview).not.toHaveBeenCalled();
+    expect(mocks.createSyncLog).not.toHaveBeenCalled();
+  });
+
+  it("rejects export sync with NotImplementedException after validating account ownership", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO");
+
+    await expect(
+      service.runSync("org_1", "user_1", "conn_1", {
+        direction: "EXPORT",
+      }),
+    ).rejects.toThrow(NotImplementedException);
+    await expect(
+      service.runSync("org_1", "user_1", "conn_1", {
+        direction: "EXPORT",
+      }),
+    ).rejects.toThrow("Connector exports are not implemented yet.");
+
+    expect(mocks.xeroAdapter.buildExportPreview).not.toHaveBeenCalled();
+    expect(mocks.xeroApiClient.listContacts).not.toHaveBeenCalled();
+    expect(mocks.xeroApiClient.listInvoices).not.toHaveBeenCalled();
+    expect(mocks.createSyncLog).not.toHaveBeenCalled();
   });
 
   it("records successful Xero sync metadata with full-sync checkpoint fields", async () => {

@@ -1,4 +1,10 @@
-import { BadRequestException, Inject, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  NotFoundException,
+  NotImplementedException
+} from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import type { ConnectorProvider } from "@daftar/types";
 import { PrismaService } from "../../common/prisma/prisma.service";
@@ -251,7 +257,7 @@ export class ConnectorsService {
     });
 
     if (!account) {
-      throw new Error("Connector account not found");
+      throw new NotFoundException("Connector account not found");
     }
 
     if (input.direction === "IMPORT") {
@@ -276,11 +282,7 @@ export class ConnectorsService {
       return this.runBootstrapImport(organizationId, userId, account.id);
     }
 
-    return this.runExportPreview(
-      organizationId,
-      account.id,
-      input.scope ?? null
-    );
+    return this.rejectConnectorExport();
   }
 
   /* =========================
@@ -300,7 +302,7 @@ export class ConnectorsService {
     });
 
     if (!account) {
-      throw new Error("Connector account not found");
+      throw new NotFoundException("Connector account not found");
     }
 
     const adapter = this.getAdapter(account.provider);
@@ -438,7 +440,7 @@ export class ConnectorsService {
     });
 
     if (!account) {
-      throw new Error("Connector account not found");
+      throw new NotFoundException("Connector account not found");
     }
 
     const adapter = this.getAdapter(account.provider);
@@ -758,24 +760,28 @@ export class ConnectorsService {
     organizationId: string,
     connectorAccountId: string
   ) {
-    return this.runExportPreview(organizationId, connectorAccountId, null);
+    const account = await this.prisma.connectorAccount.findFirst({
+      where: {
+        id: connectorAccountId,
+        organizationId
+      }
+    });
+
+    if (!account) {
+      throw new Error("Connector account not found");
+    }
+
+    return this.rejectConnectorExport();
   }
 
   /* =========================
      EXPORT PREVIEW
   ========================= */
 
-  private async runExportPreview(
-    organizationId: string,
-    connectorAccountId: string,
-    scope: string | null
-  ) {
-    return {
-      organizationId,
-      connectorAccountId,
-      scope,
-      message: "Export preview not implemented yet"
-    };
+  private rejectConnectorExport(): never {
+    throw new NotImplementedException(
+      "Connector exports are not implemented yet."
+    );
   }
 
   /* =========================

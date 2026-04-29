@@ -255,6 +255,63 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     expect(String(response.body.message)).toMatch(/missing realmId/i);
   });
 
+  it("explicitly disables connector exports without creating export logs", async () => {
+    const cookies = await signIn("owner@daftar.local");
+    await switchOrg(cookies, "nomad-events");
+
+    const organization = await prisma.organization.findUniqueOrThrow({
+      where: { slug: "nomad-events" }
+    });
+    const connectorAccount = await prisma.connectorAccount.findFirstOrThrow({
+      where: {
+        organizationId: organization.id,
+        provider: "XERO"
+      },
+      orderBy: { createdAt: "asc" }
+    });
+    const exportLogCountBefore = await prisma.connectorSyncLog.count({
+      where: {
+        organizationId: organization.id,
+        connectorAccountId: connectorAccount.id,
+        direction: "EXPORT"
+      }
+    });
+
+    const previewResponse = await request(app.getHttpServer())
+      .get(`/v1/connectors/accounts/${connectorAccount.id}/export-preview`)
+      .set("Cookie", cookies)
+      .expect(501);
+
+    expect(String(previewResponse.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
+
+    const syncResponse = await request(app.getHttpServer())
+      .post(`/v1/connectors/accounts/${connectorAccount.id}/sync`)
+      .set("Cookie", cookies)
+      .send({ direction: "EXPORT" })
+      .expect(501);
+
+    expect(String(syncResponse.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
+
+    const exportLogCountAfter = await prisma.connectorSyncLog.count({
+      where: {
+        organizationId: organization.id,
+        connectorAccountId: connectorAccount.id,
+        direction: "EXPORT"
+      }
+    });
+    expect(exportLogCountAfter).toBe(exportLogCountBefore);
+
+    const missingPreviewResponse = await request(app.getHttpServer())
+      .get("/v1/connectors/accounts/missing-connector-account/export-preview")
+      .set("Cookie", cookies);
+
+    expect(missingPreviewResponse.status).not.toBe(501);
+  });
+
   it("queues only eligible connector invoices and follows the real compliance queue path", async () => {
     const cookies = await signIn("owner@daftar.local");
     await switchOrg(cookies, "nomad-events");

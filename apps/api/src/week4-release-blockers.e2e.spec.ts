@@ -66,9 +66,6 @@ describe.sequential("Daftar Week 4 release blockers", () => {
     const eventsOrg = await prisma.organization.findUniqueOrThrow({
       where: { slug: "nomad-events" }
     });
-    const labsOrg = await prisma.organization.findUniqueOrThrow({
-      where: { slug: "nomad-labs" }
-    });
     const owner = await prisma.user.findUniqueOrThrow({
       where: { email: "owner@daftar.local" }
     });
@@ -91,11 +88,10 @@ describe.sequential("Daftar Week 4 release blockers", () => {
     const exportPreview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
       .set("Cookie", cookies)
-      .expect(200);
-    expect(exportPreview.body.organizationId).toBe(eventsOrg.id);
-    expect(exportPreview.body.connectorAccountId).toBe(xeroAccount.id);
-    expect(exportPreview.body.scope).toBeNull();
-    expect(String(exportPreview.body.message)).toMatch(/not implemented/i);
+      .expect(501);
+    expect(String(exportPreview.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
 
     const connectAttempt = await request(app.getHttpServer())
       .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
@@ -130,19 +126,19 @@ describe.sequential("Daftar Week 4 release blockers", () => {
       .post(`/v1/connectors/accounts/${xeroAccount.id}/sync`)
       .set("Cookie", cookies)
       .send({ direction: "EXPORT", scope: "contacts" })
-      .expect(201);
-    expect(syncAttempt.body.organizationId).toBe(eventsOrg.id);
-    expect(syncAttempt.body.connectorAccountId).toBe(xeroAccount.id);
-    expect(syncAttempt.body.scope).toBe("contacts");
-    expect(String(syncAttempt.body.message)).toMatch(/not implemented/i);
+      .expect(501);
+    expect(String(syncAttempt.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
 
     await switchOrg(cookies, "nomad-labs");
     const crossOrgPreview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${xeroAccount.id}/export-preview`)
-      .set("Cookie", cookies)
-      .expect(200);
-    expect(crossOrgPreview.body.organizationId).toBe(labsOrg.id);
-    expect(crossOrgPreview.body.connectorAccountId).toBe(xeroAccount.id);
+      .set("Cookie", cookies);
+    expect(crossOrgPreview.status).not.toBe(501);
+    expect(String(crossOrgPreview.body.message)).not.toBe(
+      "Connector exports are not implemented yet."
+    );
   });
 
   it("shows persisted billing state and blocks manual customer-managed billing mutations", async () => {

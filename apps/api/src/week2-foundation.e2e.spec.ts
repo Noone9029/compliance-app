@@ -409,11 +409,10 @@ describe.sequential("Daftar Week 2 foundation", () => {
     const preview = await request(app.getHttpServer())
       .get(`/v1/connectors/accounts/${existingZohoAccount.id}/export-preview`)
       .set("Cookie", cookies)
-      .expect(200);
-    expect(preview.body.organizationId).toBe(eventsOrg.id);
-    expect(preview.body.connectorAccountId).toBe(existingZohoAccount.id);
-    expect(preview.body.scope).toBeNull();
-    expect(String(preview.body.message)).toMatch(/not implemented/i);
+      .expect(501);
+    expect(String(preview.body.message)).toBe(
+      "Connector exports are not implemented yet."
+    );
 
     const connectAttempt = await request(app.getHttpServer())
       .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
