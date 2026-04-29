@@ -65,6 +65,9 @@ type FreshXeroAccount = {
 
 @Injectable()
 export class XeroApiClient {
+  private static readonly pageSize = 100;
+  private static readonly maxPageCount = 1000;
+
   private readonly refreshInFlight = new Map<
     string,
     Promise<FreshXeroAccount>
@@ -81,24 +84,25 @@ export class XeroApiClient {
 
   async listContacts(connectorAccountId: string): Promise<XeroContact[]> {
     const account = await this.getFreshAccount(connectorAccountId);
-    const data = await this.getJson<XeroContactsResponse>(
-      "Contacts",
-      account.accessToken,
-      account.externalTenantId
-    );
 
-    return data.Contacts ?? [];
+    return this.listPaged<XeroContact, XeroContactsResponse>({
+      account,
+      resource: "Contacts",
+      extractItems: (data) => data.Contacts ?? []
+    });
   }
 
   async listInvoices(connectorAccountId: string): Promise<XeroInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
-    const data = await this.getJson<XeroInvoicesResponse>(
-      "Invoices?where=Type%3D%3D%22ACCREC%22",
-      account.accessToken,
-      account.externalTenantId
-    );
 
-    return data.Invoices ?? [];
+    return this.listPaged<XeroInvoice, XeroInvoicesResponse>({
+      account,
+      resource: "Invoices",
+      params: {
+        where: 'Type=="ACCREC"'
+      },
+      extractItems: (data) => data.Invoices ?? []
+    });
   }
 
   private async getFreshAccount(
@@ -166,16 +170,59 @@ export class XeroApiClient {
       provider: "Xero",
       endpoint,
       init: {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json",
-        "xero-tenant-id": tenantId
-      }
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json",
+          "xero-tenant-id": tenantId
+        }
       }
     });
 
     return (await response.json()) as T;
+  }
+
+  private async listPaged<TItem, TResponse>(input: {
+    account: FreshXeroAccount;
+    resource: string;
+    params?: Record<string, string>;
+    extractItems: (response: TResponse) => TItem[];
+  }): Promise<TItem[]> {
+    const items: TItem[] = [];
+
+    for (let page = 1; page <= XeroApiClient.maxPageCount; page += 1) {
+      const response = await this.getJson<TResponse>(
+        this.buildPagedPath(input.resource, page, input.params),
+        input.account.accessToken,
+        input.account.externalTenantId
+      );
+      const pageItems = input.extractItems(response);
+
+      if (pageItems.length === 0) {
+        return items;
+      }
+
+      items.push(...pageItems);
+
+      if (pageItems.length < XeroApiClient.pageSize) {
+        return items;
+      }
+    }
+
+    throw new Error(
+      `Xero ${input.resource} pagination exceeded ${XeroApiClient.maxPageCount} pages.`
+    );
+  }
+
+  private buildPagedPath(
+    resource: string,
+    page: number,
+    params: Record<string, string> = {}
+  ) {
+    const searchParams = new URLSearchParams(params);
+    searchParams.set("page", String(page));
+
+    return `${resource}?${searchParams.toString()}`;
   }
 
   private requireTenantId(value: string | null) {

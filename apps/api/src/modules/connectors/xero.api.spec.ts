@@ -83,6 +83,20 @@ function mockConnectedXeroAccount(mocks: ReturnType<typeof createHarness>["mocks
   });
 }
 
+function xeroContactsPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    ContactID: `contact-${page}-${index + 1}`,
+    Name: `Customer ${page}-${index + 1}`
+  }));
+}
+
+function xeroInvoicesPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    InvoiceID: `invoice-${page}-${index + 1}`,
+    Type: "ACCREC"
+  }));
+}
+
 describe("xero api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -235,6 +249,139 @@ describe("xero api client", () => {
     expect(mocks.getDecryptedCredentials).not.toHaveBeenCalled();
   });
 
+  it("fetches multiple contact pages and concatenates contacts until an empty page", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: xeroContactsPage(1, 100)
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: xeroContactsPage(2, 1)
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_xero_retry");
+
+    expect(contacts).toHaveLength(101);
+    expect(contacts[0]).toEqual({
+      ContactID: "contact-1-1",
+      Name: "Customer 1-1"
+    });
+    expect(contacts[100]).toEqual({
+      ContactID: "contact-2-1",
+      Name: "Customer 2-1"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.map((call) =>
+        new URL(String(call[0])).searchParams.get("page")
+      )
+    ).toEqual(["1", "2"]);
+  });
+
+  it("stops contact pagination after the first empty page", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          Contacts: []
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_xero_retry");
+
+    expect(contacts).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(
+      new URL(String(fetchMock.mock.calls[0]?.[0])).searchParams.get("page")
+    ).toBe("1");
+  });
+
+  it("fetches multiple invoice pages while preserving the ACCREC where filter", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Invoices: xeroInvoicesPage(1, 100)
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Invoices: xeroInvoicesPage(2, 1)
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_xero_retry");
+
+    expect(invoices).toHaveLength(101);
+    expect(invoices[0]).toEqual({ InvoiceID: "invoice-1-1", Type: "ACCREC" });
+    expect(invoices[100]).toEqual({
+      InvoiceID: "invoice-2-1",
+      Type: "ACCREC"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.map((call) => {
+        const url = new URL(String(call[0]));
+        return {
+          page: url.searchParams.get("page"),
+          where: url.searchParams.get("where")
+        };
+      })
+    ).toEqual([
+      { page: "1", where: 'Type=="ACCREC"' },
+      { page: "2", where: 'Type=="ACCREC"' }
+    ]);
+  });
+
+  it("throws if Xero pagination exceeds the safety page cap", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          Contacts: xeroContactsPage(1, 100)
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.listContacts("conn_xero_retry")).rejects.toThrow(
+      /pagination exceeded 1000 pages/i
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1000);
+  });
+
   it("retries 429 responses with Retry-After before returning contacts", async () => {
     const { api, mocks } = createHarness();
     mockConnectedXeroAccount(mocks);
@@ -254,6 +401,14 @@ describe("xero api client", () => {
           ok: true,
           body: {
             Contacts: [{ ContactID: "contact-1", Name: "Retry Customer" }]
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: []
           }
         })
       );
