@@ -43,8 +43,17 @@ function createServiceHarness() {
     connectorCredential,
     connectorSyncLog,
     connectorOAuthState,
-    $transaction: vi.fn(async (callback: (tx: { connectorAccount: typeof connectorAccount }) => unknown) =>
-      callback({ connectorAccount }),
+    $transaction: vi.fn(
+      async (
+        callback: (tx: {
+          connectorAccount: typeof connectorAccount;
+          connectorSyncLog: typeof connectorSyncLog;
+        }) => unknown,
+      ) =>
+        callback({
+          connectorAccount,
+          connectorSyncLog,
+        }),
     ),
   } as any;
 
@@ -134,11 +143,13 @@ function createServiceHarness() {
 function mockConnectedAccount(
   mocks: ReturnType<typeof createServiceHarness>["mocks"],
   provider: ConnectorProvider,
+  metadata: Record<string, unknown> | null = null,
 ) {
   mocks.findFirstConnectorAccount.mockResolvedValue({
     id: "conn_1",
     organizationId: "org_1",
     provider,
+    metadata,
   });
   mocks.findUniqueCredential.mockResolvedValue({ id: "credential_1" });
   mocks.updateConnectorAccount.mockResolvedValue({});
@@ -523,7 +534,7 @@ describe("connectors service", () => {
     expect(mocks.createSyncLog).not.toHaveBeenCalled();
   });
 
-  it("records successful Xero sync metadata with full-sync checkpoint fields", async () => {
+  it("runs the first Xero sync as full sync without modified-since and records checkpoint metadata", async () => {
     const { service, mocks } = createServiceHarness();
     mockConnectedAccount(mocks, "XERO");
     stubImportPersistence(service);
@@ -538,13 +549,21 @@ describe("connectors service", () => {
     });
 
     const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    const updateData = mocks.updateConnectorAccount.mock.calls[0]?.[0].data;
+    expect(mocks.xeroApiClient.listContacts).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
+    expect(mocks.xeroApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
     expect(metadata).toMatchObject({
       provider: "XERO",
       mode: "xero-live",
       syncMode: "FULL",
       incrementalApplied: false,
       checkpointBefore: null,
-      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
       contactsFetched: 2,
       invoicesFetched: 1,
       contactsPersisted: 2,
@@ -552,8 +571,137 @@ describe("connectors service", () => {
       invoicesQueuedForCompliance: 1,
       invoicesSkippedForCompliance: 0,
     });
+    expect(metadata.checkpointAfter).toEqual({
+      contactsModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(updateData.metadata).toMatchObject({
+      sync: {
+        xero: metadata.checkpointAfter,
+      },
+    });
+    expect(updateData.lastSyncedAt).toBeInstanceOf(Date);
     expectIsoTimestamp(metadata.syncStartedAt);
     expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("runs a later Xero sync as incremental with overlapped modified-since", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO", {
+      sync: {
+        xero: {
+          contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+        },
+      },
+      preserved: "value",
+    });
+    stubImportPersistence(service);
+    mocks.xeroApiClient.listContacts.mockResolvedValue([{ ContactID: "contact_1" }]);
+    mocks.xeroApiClient.listInvoices.mockResolvedValue([{ InvoiceID: "invoice_1" }]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const expectedModifiedSince = new Date("2026-04-29T09:50:00.000Z");
+    expect(mocks.xeroApiClient.listContacts).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+    expect(mocks.xeroApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "XERO",
+      mode: "xero-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+      },
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expect(metadata.checkpointAfter).toEqual({
+      contactsModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(mocks.updateConnectorAccount.mock.calls[0]?.[0].data.metadata).toMatchObject({
+      preserved: "value",
+      sync: {
+        xero: metadata.checkpointAfter,
+      },
+    });
+  });
+
+  it("does not advance Xero checkpoint when provider fetch fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO", {
+      sync: {
+        xero: {
+          contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+        },
+      },
+    });
+    mocks.xeroApiClient.listContacts.mockRejectedValue(
+      new Error("Xero unavailable"),
+    );
+    mocks.xeroApiClient.listInvoices.mockResolvedValue([]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "XERO",
+      mode: "xero-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+      },
+      checkpointAfter: null,
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expectIsoTimestamp(metadata.syncFailedAt);
+  });
+
+  it("does not advance Xero checkpoint when local import persistence fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "XERO");
+    vi.spyOn(service as any, "persistCanonicalImportBundle").mockRejectedValue(
+      new Error("Import persistence failed"),
+    );
+    mocks.xeroApiClient.listContacts.mockResolvedValue([{ ContactID: "contact_1" }]);
+    mocks.xeroApiClient.listInvoices.mockResolvedValue([{ InvoiceID: "invoice_1" }]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "XERO",
+      mode: "xero-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
+      message: "Import persistence failed",
+    });
   });
 
   it("records successful QuickBooks sync metadata with full-sync checkpoint fields", async () => {

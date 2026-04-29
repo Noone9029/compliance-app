@@ -362,6 +362,79 @@ describe("xero api client", () => {
     ]);
   });
 
+  it("applies If-Modified-Since while preserving contact pagination", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: xeroContactsPage(1, 100)
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Contacts: []
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_xero_retry", {
+      modifiedSince
+    });
+
+    expect(contacts).toHaveLength(100);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(
+      fetchMock.mock.calls.map((call) => ({
+        page: new URL(String(call[0])).searchParams.get("page"),
+        modifiedSince: call[1]?.headers?.["If-Modified-Since"]
+      }))
+    ).toEqual([
+      { page: "1", modifiedSince: modifiedSince.toUTCString() },
+      { page: "2", modifiedSince: modifiedSince.toUTCString() }
+    ]);
+  });
+
+  it("applies If-Modified-Since while preserving invoice filter and page", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedXeroAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            Invoices: xeroInvoicesPage(1, 1)
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_xero_retry", {
+      modifiedSince
+    });
+
+    expect(invoices).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const url = new URL(String(fetchMock.mock.calls[0]?.[0]));
+    expect(url.searchParams.get("where")).toBe('Type=="ACCREC"');
+    expect(url.searchParams.get("page")).toBe("1");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers?.["If-Modified-Since"]).toBe(
+      modifiedSince.toUTCString()
+    );
+  });
+
   it("throws if Xero pagination exceeds the safety page cap", async () => {
     const { api, mocks } = createHarness();
     mockConnectedXeroAccount(mocks);

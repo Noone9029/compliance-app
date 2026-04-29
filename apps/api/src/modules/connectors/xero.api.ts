@@ -63,6 +63,10 @@ type FreshXeroAccount = {
   accessToken: string;
 };
 
+type XeroListOptions = {
+  modifiedSince?: Date | null;
+};
+
 @Injectable()
 export class XeroApiClient {
   private static readonly pageSize = 100;
@@ -82,17 +86,24 @@ export class XeroApiClient {
     private readonly connectorCredentials: ConnectorCredentialsService
   ) {}
 
-  async listContacts(connectorAccountId: string): Promise<XeroContact[]> {
+  async listContacts(
+    connectorAccountId: string,
+    options: XeroListOptions = {}
+  ): Promise<XeroContact[]> {
     const account = await this.getFreshAccount(connectorAccountId);
 
     return this.listPaged<XeroContact, XeroContactsResponse>({
       account,
       resource: "Contacts",
+      modifiedSince: options.modifiedSince ?? null,
       extractItems: (data) => data.Contacts ?? []
     });
   }
 
-  async listInvoices(connectorAccountId: string): Promise<XeroInvoice[]> {
+  async listInvoices(
+    connectorAccountId: string,
+    options: XeroListOptions = {}
+  ): Promise<XeroInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
 
     return this.listPaged<XeroInvoice, XeroInvoicesResponse>({
@@ -101,6 +112,7 @@ export class XeroApiClient {
       params: {
         where: 'Type=="ACCREC"'
       },
+      modifiedSince: options.modifiedSince ?? null,
       extractItems: (data) => data.Invoices ?? []
     });
   }
@@ -162,7 +174,8 @@ export class XeroApiClient {
   private async getJson<T>(
     path: string,
     accessToken: string,
-    tenantId: string
+    tenantId: string,
+    extraHeaders: Record<string, string> = {}
   ): Promise<T> {
     const endpoint = `https://api.xero.com/api.xro/2.0/${path}`;
 
@@ -174,7 +187,8 @@ export class XeroApiClient {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           Accept: "application/json",
-          "xero-tenant-id": tenantId
+          "xero-tenant-id": tenantId,
+          ...extraHeaders
         }
       }
     });
@@ -186,15 +200,18 @@ export class XeroApiClient {
     account: FreshXeroAccount;
     resource: string;
     params?: Record<string, string>;
+    modifiedSince?: Date | null;
     extractItems: (response: TResponse) => TItem[];
   }): Promise<TItem[]> {
     const items: TItem[] = [];
+    const headers = this.buildModifiedSinceHeaders(input.modifiedSince ?? null);
 
     for (let page = 1; page <= XeroApiClient.maxPageCount; page += 1) {
       const response = await this.getJson<TResponse>(
         this.buildPagedPath(input.resource, page, input.params),
         input.account.accessToken,
-        input.account.externalTenantId
+        input.account.externalTenantId,
+        headers
       );
       const pageItems = input.extractItems(response);
 
@@ -223,6 +240,23 @@ export class XeroApiClient {
     searchParams.set("page", String(page));
 
     return `${resource}?${searchParams.toString()}`;
+  }
+
+  private buildModifiedSinceHeaders(
+    modifiedSince: Date | null
+  ): Record<string, string> {
+    if (!modifiedSince) {
+      return {};
+    }
+
+    const timestamp = modifiedSince.getTime();
+    if (Number.isNaN(timestamp)) {
+      throw new Error("Xero modifiedSince timestamp is invalid.");
+    }
+
+    return {
+      "If-Modified-Since": modifiedSince.toUTCString()
+    };
   }
 
   private requireTenantId(value: string | null) {

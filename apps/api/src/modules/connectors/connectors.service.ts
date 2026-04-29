@@ -39,8 +39,25 @@ import type {
   CanonicalImportBundle
 } from "./connector-adapter";
 
+type XeroSyncCheckpoint = {
+  contactsModifiedSince: string;
+  invoicesModifiedSince: string;
+};
+
+type XeroSyncPlan = {
+  syncMode: "FULL" | "INCREMENTAL";
+  incrementalApplied: boolean;
+  checkpointBefore: XeroSyncCheckpoint | null;
+  checkpointAfter: XeroSyncCheckpoint;
+  modifiedSince: Date | null;
+  modifiedSinceApplied: string | null;
+  overlapMinutes: number;
+};
+
 @Injectable()
 export class ConnectorsService {
+  private static readonly xeroCheckpointOverlapMinutes = 10;
+
   private readonly adapters: Map<string, ConnectorAdapter>;
   private readonly transports: Map<string, ConnectorProviderTransport>;
 
@@ -450,11 +467,19 @@ export class ConnectorsService {
     }
 
     const startedAt = new Date();
+    const syncPlan = this.buildXeroSyncPlan(
+      (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+      startedAt
+    );
 
     try {
       const [contacts, invoices] = await Promise.all([
-        this.xeroApiClient.listContacts(connectorAccountId),
-        this.xeroApiClient.listInvoices(connectorAccountId)
+        this.xeroApiClient.listContacts(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        }),
+        this.xeroApiClient.listInvoices(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        })
       ]);
 
       const bundle = (adapter as XeroAdapter).mapLiveImportPayload({
@@ -474,39 +499,53 @@ export class ConnectorsService {
         connectorAccountId
       );
 
-      await this.prisma.connectorAccount.update({
-        where: { id: connectorAccountId },
-        data: {
-          lastSyncedAt: new Date()
-        }
-      });
-
       const finishedAt = new Date();
-      const log = await this.prisma.connectorSyncLog.create({
-        data: {
-          organizationId,
-          connectorAccountId,
-          direction: "IMPORT",
-          scope: "FULL",
-          status: "SUCCESS",
-          retryable: false,
-          startedAt,
-          finishedAt,
-          metadata: this.buildSuccessfulSyncMetadata({
-            provider: "XERO",
-            mode: "xero-live",
+      const log = await this.prisma.$transaction(async (tx) => {
+        const createdLog = await tx.connectorSyncLog.create({
+          data: {
+            organizationId,
+            connectorAccountId,
+            direction: "IMPORT",
+            scope: "FULL",
+            status: "SUCCESS",
+            retryable: false,
             startedAt,
             finishedAt,
-            counts: {
-              contactsFetched: contacts.length,
-              invoicesFetched: invoices.length,
-              contactsPersisted: summary.contacts,
-              invoicesPrepared: summary.invoices,
-              invoicesQueuedForCompliance: compliance.queued,
-              invoicesSkippedForCompliance: compliance.skipped
-            }
-          })
-        }
+            metadata: this.buildSuccessfulSyncMetadata({
+              provider: "XERO",
+              mode: "xero-live",
+              startedAt,
+              finishedAt,
+              syncMode: syncPlan.syncMode,
+              incrementalApplied: syncPlan.incrementalApplied,
+              checkpointBefore: syncPlan.checkpointBefore,
+              checkpointAfter: syncPlan.checkpointAfter,
+              modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+              overlapMinutes: syncPlan.overlapMinutes,
+              counts: {
+                contactsFetched: contacts.length,
+                invoicesFetched: invoices.length,
+                contactsPersisted: summary.contacts,
+                invoicesPrepared: summary.invoices,
+                invoicesQueuedForCompliance: compliance.queued,
+                invoicesSkippedForCompliance: compliance.skipped
+              }
+            })
+          }
+        });
+
+        await tx.connectorAccount.update({
+          where: { id: connectorAccountId },
+          data: {
+            lastSyncedAt: finishedAt,
+            metadata: this.mergeXeroCheckpoint(
+              (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+              syncPlan.checkpointAfter
+            )
+          }
+        });
+
+        return createdLog;
       });
 
       return {
@@ -541,7 +580,13 @@ export class ConnectorsService {
             mode: "xero-live",
             startedAt,
             failedAt,
-            message
+            message,
+            syncMode: syncPlan.syncMode,
+            incrementalApplied: syncPlan.incrementalApplied,
+            checkpointBefore: syncPlan.checkpointBefore,
+            checkpointAfter: null,
+            modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+            overlapMinutes: syncPlan.overlapMinutes
           })
         }
       });
@@ -1286,15 +1331,27 @@ export class ConnectorsService {
     mode: string;
     startedAt: Date;
     finishedAt: Date;
+    syncMode?: "FULL" | "INCREMENTAL";
+    incrementalApplied?: boolean;
+    checkpointBefore?: XeroSyncCheckpoint | null;
+    checkpointAfter?: XeroSyncCheckpoint | null;
+    modifiedSinceApplied?: string | null;
+    overlapMinutes?: number;
     counts: Record<string, number>;
   }) {
     return {
       provider: input.provider,
       mode: input.mode,
-      syncMode: "FULL",
-      incrementalApplied: false,
-      checkpointBefore: null,
-      checkpointAfter: null,
+      syncMode: input.syncMode ?? "FULL",
+      incrementalApplied: input.incrementalApplied ?? false,
+      checkpointBefore: input.checkpointBefore ?? null,
+      checkpointAfter: input.checkpointAfter ?? null,
+      ...(input.modifiedSinceApplied !== undefined
+        ? { modifiedSinceApplied: input.modifiedSinceApplied }
+        : {}),
+      ...(input.overlapMinutes !== undefined
+        ? { overlapMinutes: input.overlapMinutes }
+        : {}),
       syncStartedAt: input.startedAt.toISOString(),
       syncFinishedAt: input.finishedAt.toISOString(),
       ...input.counts
@@ -1307,14 +1364,26 @@ export class ConnectorsService {
     startedAt: Date;
     failedAt: Date;
     message: string;
+    syncMode?: "FULL" | "INCREMENTAL";
+    incrementalApplied?: boolean;
+    checkpointBefore?: XeroSyncCheckpoint | null;
+    checkpointAfter?: XeroSyncCheckpoint | null;
+    modifiedSinceApplied?: string | null;
+    overlapMinutes?: number;
   }) {
     return {
       provider: input.provider,
       mode: input.mode,
-      syncMode: "FULL",
-      incrementalApplied: false,
-      checkpointBefore: null,
-      checkpointAfter: null,
+      syncMode: input.syncMode ?? "FULL",
+      incrementalApplied: input.incrementalApplied ?? false,
+      checkpointBefore: input.checkpointBefore ?? null,
+      checkpointAfter: input.checkpointAfter ?? null,
+      ...(input.modifiedSinceApplied !== undefined
+        ? { modifiedSinceApplied: input.modifiedSinceApplied }
+        : {}),
+      ...(input.overlapMinutes !== undefined
+        ? { overlapMinutes: input.overlapMinutes }
+        : {}),
       syncStartedAt: input.startedAt.toISOString(),
       syncFailedAt: input.failedAt.toISOString(),
       message: input.message
@@ -1330,6 +1399,124 @@ export class ConnectorsService {
       /(access[_-]?token|refresh[_-]?token|authorization|client[_-]?secret|secret|password)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
       "$1$2[REDACTED]"
     );
+  }
+
+  private buildXeroSyncPlan(
+    metadata: Prisma.JsonValue | null,
+    startedAt: Date
+  ): XeroSyncPlan {
+    const checkpointBefore = this.readXeroCheckpoint(metadata);
+    const checkpointAfter = {
+      contactsModifiedSince: startedAt.toISOString(),
+      invoicesModifiedSince: startedAt.toISOString()
+    };
+
+    if (!checkpointBefore) {
+      return {
+        syncMode: "FULL",
+        incrementalApplied: false,
+        checkpointBefore: null,
+        checkpointAfter,
+        modifiedSince: null,
+        modifiedSinceApplied: null,
+        overlapMinutes: 0
+      };
+    }
+
+    const modifiedSinceBase = this.earliestCheckpointDate(checkpointBefore);
+    const overlapMinutes = ConnectorsService.xeroCheckpointOverlapMinutes;
+    const modifiedSince = new Date(
+      modifiedSinceBase.getTime() - overlapMinutes * 60 * 1000
+    );
+
+    return {
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore,
+      checkpointAfter,
+      modifiedSince,
+      modifiedSinceApplied: modifiedSince.toISOString(),
+      overlapMinutes
+    };
+  }
+
+  private readXeroCheckpoint(
+    metadata: Prisma.JsonValue | null
+  ): XeroSyncCheckpoint | null {
+    if (!this.isRecord(metadata)) {
+      return null;
+    }
+
+    const sync = metadata.sync;
+    if (!this.isRecord(sync)) {
+      return null;
+    }
+
+    const xero = sync.xero;
+    if (!this.isRecord(xero)) {
+      return null;
+    }
+
+    const contactsModifiedSince = this.readIsoString(
+      xero.contactsModifiedSince
+    );
+    const invoicesModifiedSince = this.readIsoString(
+      xero.invoicesModifiedSince
+    );
+
+    if (!contactsModifiedSince || !invoicesModifiedSince) {
+      return null;
+    }
+
+    return {
+      contactsModifiedSince,
+      invoicesModifiedSince
+    };
+  }
+
+  private earliestCheckpointDate(checkpoint: XeroSyncCheckpoint) {
+    const dates = [
+      new Date(checkpoint.contactsModifiedSince),
+      new Date(checkpoint.invoicesModifiedSince)
+    ];
+
+    return dates.reduce((earliest, current) =>
+      current.getTime() < earliest.getTime() ? current : earliest
+    );
+  }
+
+  private mergeXeroCheckpoint(
+    metadata: Prisma.JsonValue | null,
+    checkpoint: XeroSyncCheckpoint
+  ) {
+    const root = this.isRecord(metadata) ? { ...metadata } : {};
+    const sync = this.isRecord(root.sync) ? { ...root.sync } : {};
+    const xero = this.isRecord(sync.xero) ? { ...sync.xero } : {};
+
+    sync.xero = {
+      ...xero,
+      ...checkpoint
+    };
+    root.sync = sync;
+
+    return root as Prisma.InputJsonValue;
+  }
+
+  private readIsoString(value: unknown) {
+    if (typeof value !== "string") {
+      return null;
+    }
+
+    const parsed = Date.parse(value);
+    if (Number.isNaN(parsed)) {
+      return null;
+    }
+
+    return new Date(parsed).toISOString();
+  }
+
+  private isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
 
   private getAdapter(provider: ConnectorProvider) {
