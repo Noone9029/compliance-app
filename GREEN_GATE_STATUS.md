@@ -10,7 +10,7 @@
 | `pnpm db:generate` | ✅ Passing | Prisma client generated successfully. |
 | `pnpm db:deploy` | ✅ Passing | 15 database migrations deployed cleanly. |
 | `pnpm db:seed` | ✅ Passing | Seed executed successfully with test data and ZATCA materials. |
-| **API Tests** | ✅ Passing | 217 passed, 3 skipped (single-fork API validation passed). |
+| **API Tests** | ✅ Passing | 222 passed, 3 skipped (single-fork API validation passed). |
 | **Worker Tests** | ✅ Passing | 3 passed (compliance queue processing validated). |
 | **Web Tests** | ✅ Passing | 56 passed (frontend components and logic validated). |
 | **Typecheck** | ✅ Passing | 7/7 packages clean with zero type errors. |
@@ -30,15 +30,16 @@
 - **Connector exports explicitly disabled:** Added 501 responses until provider write/idempotency support exists.
 - **Xero incremental sync foundation:** Added Xero modified-since imports with metadata-backed checkpoints and a safe overlap window.
 - **QuickBooks incremental sync foundation:** Added QuickBooks modified-since imports with metadata-backed checkpoints and a safe overlap window.
+- **Zoho Books incremental sync foundation:** Added Zoho modified-since imports with metadata-backed checkpoints and a safe overlap window.
 
-Connector full imports now have pagination, retry/rate-limit handling, and richer sync logs. Xero and QuickBooks now have incremental sync foundations, while Zoho modified-since support remains required before paid-production readiness.
+Connector full imports now have pagination, retry/rate-limit handling, and richer sync logs. Xero, QuickBooks, and Zoho now have incremental sync foundations, while live-provider validation and delete/tombstone handling remain required before paid-production readiness.
 
 ## Known Remaining Production Blockers
 
 While the test gate is green and initial hardening has landed, the following technical and operational components must still be addressed before the application is fully paid-production-ready:
 
 - **Connector Webhooks:** Complete robust webhook listening for Xero/Zoho to instantly reflect third-party modifications in Daftar.
-- **Incremental Sync / Modified-Since Support:** Complete provider-specific incremental import checkpoints for Zoho, and validate Xero/QuickBooks behavior against live provider data.
+- **Incremental Sync / Modified-Since Support:** Validate provider-specific incremental import behavior against live provider data and add delete/tombstone handling where supported.
 - **Production Storage / Signing / Ops Hardening:** Migrate secret handling to a real KMS/Vault, harden signing/certificate operations, and establish production deployment pipelines (Vercel/AWS).
 - **Staging Deployment:** Stand up a live, persistent staging environment for final client UAT (User Acceptance Testing) and demo preparation.
 - **Live ZATCA Production Onboarding:** Complete and validate production onboarding against live ZATCA requirements before real taxpayer use.

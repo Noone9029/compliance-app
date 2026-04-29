@@ -108,7 +108,8 @@ function parsedZohoRequests(fetchMock: ReturnType<typeof vi.fn>) {
       endpoint: `${url.origin}${url.pathname}`,
       organizationId: url.searchParams.get("organization_id"),
       perPage: url.searchParams.get("per_page"),
-      page: url.searchParams.get("page")
+      page: url.searchParams.get("page"),
+      lastModifiedTime: url.searchParams.get("last_modified_time")
     };
   });
 }
@@ -317,13 +318,15 @@ describe("zoho api client", () => {
         endpoint: "https://www.zohoapis.eu/books/v3/contacts",
         organizationId: "zoho-org-retry",
         perPage: "200",
-        page: "1"
+        page: "1",
+        lastModifiedTime: null
       },
       {
         endpoint: "https://www.zohoapis.eu/books/v3/contacts",
         organizationId: "zoho-org-retry",
         perPage: "200",
-        page: "2"
+        page: "2",
+        lastModifiedTime: null
       }
     ]);
   });
@@ -350,7 +353,8 @@ describe("zoho api client", () => {
       endpoint: "https://www.zohoapis.eu/books/v3/contacts",
       organizationId: "zoho-org-retry",
       perPage: "200",
-      page: "1"
+      page: "1",
+      lastModifiedTime: null
     });
   });
 
@@ -400,13 +404,117 @@ describe("zoho api client", () => {
         endpoint: "https://www.zohoapis.eu/books/v3/invoices",
         organizationId: "zoho-org-retry",
         perPage: "200",
-        page: "1"
+        page: "1",
+        lastModifiedTime: null
       },
       {
         endpoint: "https://www.zohoapis.eu/books/v3/invoices",
         organizationId: "zoho-org-retry",
         perPage: "200",
-        page: "2"
+        page: "2",
+        lastModifiedTime: null
+      }
+    ]);
+  });
+
+  it("fetches contact pages with modified-since while preserving required query params", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            contacts: zohoContactsPage(1, 200)
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            contacts: zohoContactsPage(2, 1)
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contacts = await api.listContacts("conn_zoho_retry", {
+      modifiedSince
+    });
+
+    expect(contacts).toHaveLength(201);
+    expect(parsedZohoRequests(fetchMock)).toEqual([
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "1",
+        lastModifiedTime: modifiedSince.toISOString()
+      },
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/contacts",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "2",
+        lastModifiedTime: modifiedSince.toISOString()
+      }
+    ]);
+  });
+
+  it("fetches invoice pages with modified-since while preserving required query params", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedZohoAccount(mocks);
+    const modifiedSince = new Date("2026-04-29T12:34:56.000Z");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            invoices: zohoInvoicesPage(1, 200),
+            page_context: {
+              has_more_page: true
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            invoices: [],
+            page_context: {
+              has_more_page: false
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_zoho_retry", {
+      modifiedSince
+    });
+
+    expect(invoices).toHaveLength(200);
+    expect(parsedZohoRequests(fetchMock)).toEqual([
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/invoices",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "1",
+        lastModifiedTime: modifiedSince.toISOString()
+      },
+      {
+        endpoint: "https://www.zohoapis.eu/books/v3/invoices",
+        organizationId: "zoho-org-retry",
+        perPage: "200",
+        page: "2",
+        lastModifiedTime: modifiedSince.toISOString()
       }
     ]);
   });
@@ -460,7 +568,8 @@ describe("zoho api client", () => {
       endpoint: "https://www.zohoapis.eu/books/v3/contacts",
       organizationId: "zoho-org-retry",
       perPage: "200",
-      page: "1000"
+      page: "1000",
+      lastModifiedTime: null
     });
   });
 

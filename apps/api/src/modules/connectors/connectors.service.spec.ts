@@ -875,7 +875,7 @@ describe("connectors service", () => {
     });
   });
 
-  it("records successful Zoho sync metadata with full-sync checkpoint fields", async () => {
+  it("runs the first Zoho sync as full sync without modified-since and records checkpoint metadata", async () => {
     const { service, mocks } = createServiceHarness();
     mockConnectedAccount(mocks, "ZOHO_BOOKS");
     stubImportPersistence(service);
@@ -890,13 +890,21 @@ describe("connectors service", () => {
     });
 
     const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    const updateData = mocks.updateConnectorAccount.mock.calls[0]?.[0].data;
+    expect(mocks.zohoApiClient.listContacts).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
+    expect(mocks.zohoApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: null,
+    });
     expect(metadata).toMatchObject({
       provider: "ZOHO_BOOKS",
       mode: "zoho-live",
       syncMode: "FULL",
       incrementalApplied: false,
       checkpointBefore: null,
-      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
       contactsFetched: 1,
       invoicesFetched: 2,
       contactsPersisted: 2,
@@ -904,8 +912,137 @@ describe("connectors service", () => {
       invoicesQueuedForCompliance: 1,
       invoicesSkippedForCompliance: 0,
     });
+    expect(metadata.checkpointAfter).toEqual({
+      contactsModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(updateData.metadata).toMatchObject({
+      sync: {
+        zoho: metadata.checkpointAfter,
+      },
+    });
+    expect(updateData.lastSyncedAt).toBeInstanceOf(Date);
     expectIsoTimestamp(metadata.syncStartedAt);
     expectIsoTimestamp(metadata.syncFinishedAt);
+  });
+
+  it("runs a later Zoho sync as incremental with overlapped modified-since", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "ZOHO_BOOKS", {
+      sync: {
+        zoho: {
+          contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+        },
+      },
+      preserved: "value",
+    });
+    stubImportPersistence(service);
+    mocks.zohoApiClient.listContacts.mockResolvedValue([{ contact_id: "contact_1" }]);
+    mocks.zohoApiClient.listInvoices.mockResolvedValue([{ invoice_id: "invoice_1" }]);
+
+    await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    const expectedModifiedSince = new Date("2026-04-29T09:50:00.000Z");
+    expect(mocks.zohoApiClient.listContacts).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+    expect(mocks.zohoApiClient.listInvoices).toHaveBeenCalledWith("conn_1", {
+      modifiedSince: expectedModifiedSince,
+    });
+
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "ZOHO_BOOKS",
+      mode: "zoho-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:05:00.000Z",
+      },
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expect(metadata.checkpointAfter).toEqual({
+      contactsModifiedSince: metadata.syncStartedAt,
+      invoicesModifiedSince: metadata.syncStartedAt,
+    });
+    expect(mocks.updateConnectorAccount.mock.calls[0]?.[0].data.metadata).toMatchObject({
+      preserved: "value",
+      sync: {
+        zoho: metadata.checkpointAfter,
+      },
+    });
+  });
+
+  it("does not advance Zoho checkpoint when provider fetch fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "ZOHO_BOOKS", {
+      sync: {
+        zoho: {
+          contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+          invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+        },
+      },
+    });
+    mocks.zohoApiClient.listContacts.mockRejectedValue(
+      new Error("Zoho unavailable"),
+    );
+    mocks.zohoApiClient.listInvoices.mockResolvedValue([]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "ZOHO_BOOKS",
+      mode: "zoho-live",
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore: {
+        contactsModifiedSince: "2026-04-29T10:00:00.000Z",
+        invoicesModifiedSince: "2026-04-29T10:00:00.000Z",
+      },
+      checkpointAfter: null,
+      modifiedSinceApplied: "2026-04-29T09:50:00.000Z",
+      overlapMinutes: 10,
+    });
+    expectIsoTimestamp(metadata.syncFailedAt);
+  });
+
+  it("does not advance Zoho checkpoint when local import persistence fails", async () => {
+    const { service, mocks } = createServiceHarness();
+    mockConnectedAccount(mocks, "ZOHO_BOOKS");
+    vi.spyOn(service as any, "persistCanonicalImportBundle").mockRejectedValue(
+      new Error("Import persistence failed"),
+    );
+    mocks.zohoApiClient.listContacts.mockResolvedValue([{ contact_id: "contact_1" }]);
+    mocks.zohoApiClient.listInvoices.mockResolvedValue([{ invoice_id: "invoice_1" }]);
+
+    const result = await service.runSync("org_1", "user_1", "conn_1", {
+      direction: "IMPORT",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(mocks.updateConnectorAccount).not.toHaveBeenCalled();
+    const metadata = mocks.createSyncLog.mock.calls[0]?.[0].data.metadata;
+    expect(metadata).toMatchObject({
+      provider: "ZOHO_BOOKS",
+      mode: "zoho-live",
+      syncMode: "FULL",
+      incrementalApplied: false,
+      checkpointBefore: null,
+      checkpointAfter: null,
+      modifiedSinceApplied: null,
+      overlapMinutes: 0,
+      message: "Import persistence failed",
+    });
   });
 
   it("records failed live sync metadata without leaking connector secrets", async () => {

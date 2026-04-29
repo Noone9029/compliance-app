@@ -69,14 +69,31 @@ type QuickBooksSyncPlan = {
   overlapMinutes: number;
 };
 
+type ZohoSyncCheckpoint = {
+  contactsModifiedSince: string;
+  invoicesModifiedSince: string;
+};
+
+type ZohoSyncPlan = {
+  syncMode: "FULL" | "INCREMENTAL";
+  incrementalApplied: boolean;
+  checkpointBefore: ZohoSyncCheckpoint | null;
+  checkpointAfter: ZohoSyncCheckpoint;
+  modifiedSince: Date | null;
+  modifiedSinceApplied: string | null;
+  overlapMinutes: number;
+};
+
 type ConnectorSyncCheckpoint =
   | XeroSyncCheckpoint
-  | QuickBooksSyncCheckpoint;
+  | QuickBooksSyncCheckpoint
+  | ZohoSyncCheckpoint;
 
 @Injectable()
 export class ConnectorsService {
   private static readonly xeroCheckpointOverlapMinutes = 10;
   private static readonly quickBooksCheckpointOverlapMinutes = 10;
+  private static readonly zohoCheckpointOverlapMinutes = 10;
 
   private readonly adapters: Map<string, ConnectorAdapter>;
   private readonly transports: Map<string, ConnectorProviderTransport>;
@@ -677,11 +694,19 @@ export class ConnectorsService {
     }
 
     const startedAt = new Date();
+    const syncPlan = this.buildZohoSyncPlan(
+      (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+      startedAt
+    );
 
     try {
       const [contacts, invoices] = await Promise.all([
-        this.zohoApiClient.listContacts(connectorAccountId),
-        this.zohoApiClient.listInvoices(connectorAccountId)
+        this.zohoApiClient.listContacts(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        }),
+        this.zohoApiClient.listInvoices(connectorAccountId, {
+          modifiedSince: syncPlan.modifiedSince
+        })
       ]);
 
       const bundle = (adapter as ZohoBooksAdapter).mapLiveImportPayload({
@@ -701,39 +726,53 @@ export class ConnectorsService {
         connectorAccountId
       );
 
-      await this.prisma.connectorAccount.update({
-        where: { id: connectorAccountId },
-        data: {
-          lastSyncedAt: new Date()
-        }
-      });
-
       const finishedAt = new Date();
-      const log = await this.prisma.connectorSyncLog.create({
-        data: {
-          organizationId,
-          connectorAccountId,
-          direction: "IMPORT",
-          scope: "FULL",
-          status: "SUCCESS",
-          retryable: false,
-          startedAt,
-          finishedAt,
-          metadata: this.buildSuccessfulSyncMetadata({
-            provider: "ZOHO_BOOKS",
-            mode: "zoho-live",
+      const log = await this.prisma.$transaction(async (tx) => {
+        const createdLog = await tx.connectorSyncLog.create({
+          data: {
+            organizationId,
+            connectorAccountId,
+            direction: "IMPORT",
+            scope: "FULL",
+            status: "SUCCESS",
+            retryable: false,
             startedAt,
             finishedAt,
-            counts: {
-              contactsFetched: contacts.length,
-              invoicesFetched: invoices.length,
-              contactsPersisted: summary.contacts,
-              invoicesPrepared: summary.invoices,
-              invoicesQueuedForCompliance: compliance.queued,
-              invoicesSkippedForCompliance: compliance.skipped
-            }
-          })
-        }
+            metadata: this.buildSuccessfulSyncMetadata({
+              provider: "ZOHO_BOOKS",
+              mode: "zoho-live",
+              startedAt,
+              finishedAt,
+              syncMode: syncPlan.syncMode,
+              incrementalApplied: syncPlan.incrementalApplied,
+              checkpointBefore: syncPlan.checkpointBefore,
+              checkpointAfter: syncPlan.checkpointAfter,
+              modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+              overlapMinutes: syncPlan.overlapMinutes,
+              counts: {
+                contactsFetched: contacts.length,
+                invoicesFetched: invoices.length,
+                contactsPersisted: summary.contacts,
+                invoicesPrepared: summary.invoices,
+                invoicesQueuedForCompliance: compliance.queued,
+                invoicesSkippedForCompliance: compliance.skipped
+              }
+            })
+          }
+        });
+
+        await tx.connectorAccount.update({
+          where: { id: connectorAccountId },
+          data: {
+            lastSyncedAt: finishedAt,
+            metadata: this.mergeZohoCheckpoint(
+              (account as { metadata?: Prisma.JsonValue | null }).metadata ?? null,
+              syncPlan.checkpointAfter
+            )
+          }
+        });
+
+        return createdLog;
       });
 
       return {
@@ -768,7 +807,13 @@ export class ConnectorsService {
             mode: "zoho-live",
             startedAt,
             failedAt,
-            message
+            message,
+            syncMode: syncPlan.syncMode,
+            incrementalApplied: syncPlan.incrementalApplied,
+            checkpointBefore: syncPlan.checkpointBefore,
+            checkpointAfter: null,
+            modifiedSinceApplied: syncPlan.modifiedSinceApplied,
+            overlapMinutes: syncPlan.overlapMinutes
           })
         }
       });
@@ -1447,6 +1492,107 @@ export class ConnectorsService {
       /(access[_-]?token|refresh[_-]?token|authorization|client[_-]?secret|secret|password)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
       "$1$2[REDACTED]"
     );
+  }
+
+  private buildZohoSyncPlan(
+    metadata: Prisma.JsonValue | null,
+    startedAt: Date
+  ): ZohoSyncPlan {
+    const checkpointBefore = this.readZohoCheckpoint(metadata);
+    const checkpointAfter = {
+      contactsModifiedSince: startedAt.toISOString(),
+      invoicesModifiedSince: startedAt.toISOString()
+    };
+
+    if (!checkpointBefore) {
+      return {
+        syncMode: "FULL",
+        incrementalApplied: false,
+        checkpointBefore: null,
+        checkpointAfter,
+        modifiedSince: null,
+        modifiedSinceApplied: null,
+        overlapMinutes: 0
+      };
+    }
+
+    const modifiedSinceBase = this.earliestZohoCheckpointDate(checkpointBefore);
+    const overlapMinutes = ConnectorsService.zohoCheckpointOverlapMinutes;
+    const modifiedSince = new Date(
+      modifiedSinceBase.getTime() - overlapMinutes * 60 * 1000
+    );
+
+    return {
+      syncMode: "INCREMENTAL",
+      incrementalApplied: true,
+      checkpointBefore,
+      checkpointAfter,
+      modifiedSince,
+      modifiedSinceApplied: modifiedSince.toISOString(),
+      overlapMinutes
+    };
+  }
+
+  private readZohoCheckpoint(
+    metadata: Prisma.JsonValue | null
+  ): ZohoSyncCheckpoint | null {
+    if (!this.isRecord(metadata)) {
+      return null;
+    }
+
+    const sync = metadata.sync;
+    if (!this.isRecord(sync)) {
+      return null;
+    }
+
+    const zoho = sync.zoho;
+    if (!this.isRecord(zoho)) {
+      return null;
+    }
+
+    const contactsModifiedSince = this.readIsoString(
+      zoho.contactsModifiedSince
+    );
+    const invoicesModifiedSince = this.readIsoString(
+      zoho.invoicesModifiedSince
+    );
+
+    if (!contactsModifiedSince || !invoicesModifiedSince) {
+      return null;
+    }
+
+    return {
+      contactsModifiedSince,
+      invoicesModifiedSince
+    };
+  }
+
+  private earliestZohoCheckpointDate(checkpoint: ZohoSyncCheckpoint) {
+    const dates = [
+      new Date(checkpoint.contactsModifiedSince),
+      new Date(checkpoint.invoicesModifiedSince)
+    ];
+
+    return dates.reduce((earliest, current) =>
+      current.getTime() < earliest.getTime() ? current : earliest
+    );
+  }
+
+  private mergeZohoCheckpoint(
+    metadata: Prisma.JsonValue | null,
+    checkpoint: ZohoSyncCheckpoint
+  ) {
+    const root = this.isRecord(metadata) ? { ...metadata } : {};
+    const sync = this.isRecord(root.sync) ? { ...root.sync } : {};
+    const zoho = this.isRecord(sync.zoho) ? { ...sync.zoho } : {};
+
+    sync.zoho = {
+      ...zoho,
+      ...checkpoint
+    };
+    root.sync = sync;
+
+    return root as Prisma.InputJsonValue;
   }
 
   private buildQuickBooksSyncPlan(

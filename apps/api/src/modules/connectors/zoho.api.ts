@@ -71,6 +71,10 @@ type FreshZohoAccount = {
   apiDomain: string;
 };
 
+type ZohoListOptions = {
+  modifiedSince?: Date | null;
+};
+
 @Injectable()
 export class ZohoApiClient {
   private static readonly pageSize = 200;
@@ -90,22 +94,30 @@ export class ZohoApiClient {
     private readonly connectorCredentials: ConnectorCredentialsService
   ) {}
 
-  async listContacts(connectorAccountId: string): Promise<ZohoContact[]> {
+  async listContacts(
+    connectorAccountId: string,
+    options: ZohoListOptions = {}
+  ): Promise<ZohoContact[]> {
     const account = await this.getFreshAccount(connectorAccountId);
 
     return this.listPaged<ZohoContact, ZohoContactsResponse>(
       account,
       "contacts",
+      options.modifiedSince ?? null,
       (data) => data.contacts ?? []
     );
   }
 
-  async listInvoices(connectorAccountId: string): Promise<ZohoInvoice[]> {
+  async listInvoices(
+    connectorAccountId: string,
+    options: ZohoListOptions = {}
+  ): Promise<ZohoInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
 
     return this.listPaged<ZohoInvoice, ZohoInvoicesResponse>(
       account,
       "invoices",
+      options.modifiedSince ?? null,
       (data) => data.invoices ?? []
     );
   }
@@ -170,7 +182,8 @@ export class ZohoApiClient {
   private async getJson<T>(
     account: FreshZohoAccount,
     resource: "contacts" | "invoices",
-    page: number
+    page: number,
+    modifiedSince: Date | null
   ): Promise<T> {
     const endpoint = new URL(
       `${account.apiDomain.replace(/\/+$/, "")}/books/v3/${resource}`
@@ -179,6 +192,7 @@ export class ZohoApiClient {
     endpoint.searchParams.set("organization_id", account.externalTenantId);
     endpoint.searchParams.set("per_page", String(ZohoApiClient.pageSize));
     endpoint.searchParams.set("page", String(page));
+    this.applyModifiedSince(endpoint, modifiedSince);
 
     const response = await fetchProviderRequest({
       provider: "Zoho",
@@ -198,12 +212,18 @@ export class ZohoApiClient {
   private async listPaged<TItem, TResponse extends { page_context?: ZohoPageContext }>(
     account: FreshZohoAccount,
     resource: "contacts" | "invoices",
+    modifiedSince: Date | null,
     extractItems: (response: TResponse) => TItem[]
   ): Promise<TItem[]> {
     const items: TItem[] = [];
 
     for (let page = 1; page <= ZohoApiClient.maxPageCount; page += 1) {
-      const data = await this.getJson<TResponse>(account, resource, page);
+      const data = await this.getJson<TResponse>(
+        account,
+        resource,
+        page,
+        modifiedSince
+      );
       const pageItems = extractItems(data);
 
       if (pageItems.length === 0) {
@@ -238,6 +258,19 @@ export class ZohoApiClient {
     }
 
     return normalized;
+  }
+
+  private applyModifiedSince(endpoint: URL, modifiedSince: Date | null) {
+    if (!modifiedSince) {
+      return;
+    }
+
+    const timestamp = modifiedSince.getTime();
+    if (Number.isNaN(timestamp)) {
+      throw new Error("Zoho modifiedSince timestamp is invalid.");
+    }
+
+    endpoint.searchParams.set("last_modified_time", modifiedSince.toISOString());
   }
 
   private async refreshWithSingleFlight(input: {
