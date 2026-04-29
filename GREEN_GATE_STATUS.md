@@ -10,7 +10,7 @@
 | `pnpm db:generate` | ✅ Passing | Prisma client generated successfully. |
 | `pnpm db:deploy` | ✅ Passing | 15 database migrations deployed cleanly. |
 | `pnpm db:seed` | ✅ Passing | Seed executed successfully with test data and ZATCA materials. |
-| **API Tests** | ✅ Passing | 199 passed, 3 skipped (single-fork API validation passed). |
+| **API Tests** | ✅ Passing | 203 passed, 3 skipped (single-fork API validation passed). |
 | **Worker Tests** | ✅ Passing | 3 passed (compliance queue processing validated). |
 | **Web Tests** | ✅ Passing | 56 passed (frontend components and logic validated). |
 | **Typecheck** | ✅ Passing | 7/7 packages clean with zero type errors. |
@@ -26,8 +26,9 @@
 - **Xero import pagination:** Added contacts and invoices pagination to reduce first-page truncation risk.
 - **QuickBooks import pagination:** Added customers and invoices pagination to reduce first-page truncation risk.
 - **Zoho Books import pagination:** Added contacts and invoices pagination to reduce first-page truncation risk.
+- **Connector sync log metadata enrichment:** Added full-sync checkpoint metadata, ISO sync timestamps, provider/mode context, and redacted failure messages to connector sync logs.
 
-Connector imports are now safer against first-page truncation across Xero, QuickBooks, and Zoho Books. Incremental sync / modified-since support is still not implemented and remains required before paid-production readiness.
+Connector full imports now have pagination, retry/rate-limit handling, and richer sync logs. Incremental sync / modified-since support is still not implemented and remains required before paid-production readiness.
 
 ## Known Remaining Production Blockers
 
