@@ -65,6 +65,9 @@ type FreshQuickBooksAccount = {
 
 @Injectable()
 export class QuickBooksApiClient {
+  private static readonly pageSize = 1000;
+  private static readonly maxPageCount = 100;
+
   private readonly refreshInFlight = new Map<
     string,
     Promise<FreshQuickBooksAccount>
@@ -83,26 +86,26 @@ export class QuickBooksApiClient {
     const account = await this.getFreshAccount(connectorAccountId);
     const realmId = this.requireRealmId(account.externalTenantId);
 
-    const data = await this.query<QuickBooksCustomer>(
+    return this.listPaged<QuickBooksCustomer>({
       realmId,
-      account.accessToken,
-      "SELECT * FROM Customer STARTPOSITION 1 MAXRESULTS 1000"
-    );
-
-    return (data.QueryResponse?.Customer as QuickBooksCustomer[] | undefined) ?? [];
+      accessToken: account.accessToken,
+      resource: "Customer",
+      extractItems: (data) =>
+        (data.QueryResponse?.Customer as QuickBooksCustomer[] | undefined) ?? []
+    });
   }
 
   async listInvoices(connectorAccountId: string): Promise<QuickBooksInvoice[]> {
     const account = await this.getFreshAccount(connectorAccountId);
     const realmId = this.requireRealmId(account.externalTenantId);
 
-    const data = await this.query<QuickBooksInvoice>(
+    return this.listPaged<QuickBooksInvoice>({
       realmId,
-      account.accessToken,
-      "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 1000"
-    );
-
-    return (data.QueryResponse?.Invoice as QuickBooksInvoice[] | undefined) ?? [];
+      accessToken: account.accessToken,
+      resource: "Invoice",
+      extractItems: (data) =>
+        (data.QueryResponse?.Invoice as QuickBooksInvoice[] | undefined) ?? []
+    });
   }
 
   private async getFreshAccount(
@@ -168,15 +171,52 @@ export class QuickBooksApiClient {
       provider: "QuickBooks",
       endpoint,
       init: {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/json"
-      }
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          Accept: "application/json"
+        }
       }
     });
 
     return (await response.json()) as QuickBooksQueryResponse<T>;
+  }
+
+  private async listPaged<T>(input: {
+    realmId: string;
+    accessToken: string;
+    resource: "Customer" | "Invoice";
+    extractItems: (response: QuickBooksQueryResponse<T>) => T[];
+  }): Promise<T[]> {
+    const items: T[] = [];
+
+    for (let page = 0; page < QuickBooksApiClient.maxPageCount; page += 1) {
+      const startPosition = page * QuickBooksApiClient.pageSize + 1;
+      const data = await this.query<T>(
+        input.realmId,
+        input.accessToken,
+        this.buildPagedQuery(input.resource, startPosition)
+      );
+      const pageItems = input.extractItems(data);
+
+      if (pageItems.length === 0) {
+        return items;
+      }
+
+      items.push(...pageItems);
+
+      if (pageItems.length < QuickBooksApiClient.pageSize) {
+        return items;
+      }
+    }
+
+    throw new Error(
+      `QuickBooks ${input.resource} pagination exceeded ${QuickBooksApiClient.maxPageCount} pages.`
+    );
+  }
+
+  private buildPagedQuery(resource: "Customer" | "Invoice", startPosition: number) {
+    return `SELECT * FROM ${resource} STARTPOSITION ${startPosition} MAXRESULTS ${QuickBooksApiClient.pageSize}`;
   }
 
   private requireRealmId(value: string | null): string {

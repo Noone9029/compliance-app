@@ -85,6 +85,27 @@ function mockConnectedQuickBooksAccount(
   });
 }
 
+function quickBooksCustomersPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    Id: `customer-${page}-${index + 1}`,
+    DisplayName: `Customer ${page}-${index + 1}`
+  }));
+}
+
+function quickBooksInvoicesPage(page: number, count: number) {
+  return Array.from({ length: count }, (_value, index) => ({
+    Id: `invoice-${page}-${index + 1}`,
+    DocNumber: `QBO-${page}-${index + 1}`
+  }));
+}
+
+function decodedQuickBooksQueries(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls.map((call) => {
+    const url = new URL(String(call[0]));
+    return url.searchParams.get("query");
+  });
+}
+
 describe("quickbooks api client", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -221,6 +242,147 @@ describe("quickbooks api client", () => {
     await expect(api.listCustomers("conn_legacy")).rejects.toThrow(/missing/i);
     expect(mocks.refreshAccessToken).not.toHaveBeenCalled();
     expect(mocks.update).not.toHaveBeenCalled();
+  });
+
+  it("fetches multiple customer pages and concatenates customers", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Customer: quickBooksCustomersPage(1, 1000)
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Customer: quickBooksCustomersPage(2, 1)
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const customers = await api.listCustomers("conn_qbo_retry");
+
+    expect(customers).toHaveLength(1001);
+    expect(customers[0]).toEqual({
+      Id: "customer-1-1",
+      DisplayName: "Customer 1-1"
+    });
+    expect(customers[1000]).toEqual({
+      Id: "customer-2-1",
+      DisplayName: "Customer 2-1"
+    });
+    expect(decodedQuickBooksQueries(fetchMock)).toEqual([
+      "SELECT * FROM Customer STARTPOSITION 1 MAXRESULTS 1000",
+      "SELECT * FROM Customer STARTPOSITION 1001 MAXRESULTS 1000"
+    ]);
+  });
+
+  it("stops customer pagination after an empty page", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          QueryResponse: {
+            Customer: []
+          }
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const customers = await api.listCustomers("conn_qbo_retry");
+
+    expect(customers).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(decodedQuickBooksQueries(fetchMock)).toEqual([
+      "SELECT * FROM Customer STARTPOSITION 1 MAXRESULTS 1000"
+    ]);
+  });
+
+  it("fetches multiple invoice pages and concatenates invoices", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Invoice: quickBooksInvoicesPage(1, 1000)
+            }
+          }
+        })
+      )
+      .mockResolvedValueOnce(
+        providerResponse({
+          ok: true,
+          body: {
+            QueryResponse: {
+              Invoice: quickBooksInvoicesPage(2, 1)
+            }
+          }
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const invoices = await api.listInvoices("conn_qbo_retry");
+
+    expect(invoices).toHaveLength(1001);
+    expect(invoices[0]).toEqual({
+      Id: "invoice-1-1",
+      DocNumber: "QBO-1-1"
+    });
+    expect(invoices[1000]).toEqual({
+      Id: "invoice-2-1",
+      DocNumber: "QBO-2-1"
+    });
+    expect(decodedQuickBooksQueries(fetchMock)).toEqual([
+      "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 1000",
+      "SELECT * FROM Invoice STARTPOSITION 1001 MAXRESULTS 1000"
+    ]);
+  });
+
+  it("throws if QuickBooks pagination exceeds the safety page cap", async () => {
+    const { api, mocks } = createHarness();
+    mockConnectedQuickBooksAccount(mocks);
+
+    const fullPage = quickBooksCustomersPage(1, 1000);
+    const fetchMock = vi.fn().mockResolvedValue(
+      providerResponse({
+        ok: true,
+        body: {
+          QueryResponse: {
+            Customer: fullPage
+          }
+        }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.listCustomers("conn_qbo_retry")).rejects.toThrow(
+      /pagination exceeded 100 pages/i
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(100);
+    expect(decodedQuickBooksQueries(fetchMock).at(-1)).toBe(
+      "SELECT * FROM Customer STARTPOSITION 99001 MAXRESULTS 1000"
+    );
   });
 
   it("retries 503 responses without Retry-After before returning invoices", async () => {
