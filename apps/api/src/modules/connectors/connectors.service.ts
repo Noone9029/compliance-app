@@ -6,6 +6,7 @@ import {
   NotImplementedException
 } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { loadEnv } from "@daftar/config";
 import type { ConnectorProvider } from "@daftar/types";
 import { PrismaService } from "../../common/prisma/prisma.service";
 import { SalesInvoiceStatus } from "@prisma/client";
@@ -95,6 +96,7 @@ export class ConnectorsService {
   private static readonly quickBooksCheckpointOverlapMinutes = 10;
   private static readonly zohoCheckpointOverlapMinutes = 10;
 
+  private readonly env = loadEnv();
   private readonly adapters: Map<string, ConnectorAdapter>;
   private readonly transports: Map<string, ConnectorProviderTransport>;
 
@@ -144,7 +146,6 @@ export class ConnectorsService {
     organizationId: string;
     userId: string;
     provider: ConnectorProvider;
-    redirectUri: string;
   }) {
     const transport = this.getTransport(input.provider);
     const nonce = createConnectorNonce();
@@ -170,7 +171,7 @@ export class ConnectorsService {
     return transport.buildAuthorizationUrl({
       organizationId: input.organizationId,
       userId: input.userId,
-      redirectUri: input.redirectUri,
+      redirectUri: this.connectorCallbackRedirectUri(),
       state
     });
   }
@@ -181,7 +182,6 @@ export class ConnectorsService {
     provider: ConnectorProvider;
     code: string;
     state: string;
-    redirectUri: string;
     externalTenantId?: string | null;
   }) {
     let decoded: ReturnType<typeof decodeConnectorState>;
@@ -217,7 +217,7 @@ export class ConnectorsService {
       organizationId: input.organizationId,
       userId: input.userId,
       code: input.code,
-      redirectUri: input.redirectUri,
+      redirectUri: this.connectorCallbackRedirectUri(),
       externalTenantId: providedExternalTenantId
     });
 
@@ -1839,6 +1839,10 @@ export class ConnectorsService {
     }
 
     return transport;
+  }
+
+  private connectorCallbackRedirectUri() {
+    return new URL("/connectors/callback", this.env.APP_BASE_URL).toString();
   }
 
   private async hasStoredCredentials(connectorAccountId: string) {

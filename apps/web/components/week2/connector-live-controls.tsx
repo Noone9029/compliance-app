@@ -27,7 +27,7 @@ const CONNECTOR_PROVIDER_OPTIONS: Array<{
   },
 ];
 
-function connectorProviderLabel(provider: ConnectorProvider) {
+export function connectorProviderLabel(provider: ConnectorProvider) {
   if (provider === "QUICKBOOKS_ONLINE") {
     return "QuickBooks Online";
   }
@@ -39,9 +39,14 @@ function connectorProviderLabel(provider: ConnectorProvider) {
   return "Xero";
 }
 
-function decodeConnectorProviderFromState(state: string): ConnectorProvider | null {
+export function decodeConnectorProviderFromState(state: string): ConnectorProvider | null {
   try {
-    const normalized = state.replace(/-/g, "+").replace(/_/g, "/");
+    const segments = state.split(".");
+    if (segments.length !== 2 || !segments[0] || !segments[1]) {
+      return null;
+    }
+
+    const normalized = segments[0].replace(/-/g, "+").replace(/_/g, "/");
     const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
     const payload = JSON.parse(atob(`${normalized}${padding}`)) as {
       provider?: unknown;
@@ -61,7 +66,7 @@ function decodeConnectorProviderFromState(state: string): ConnectorProvider | nu
   }
 }
 
-async function readError(response: Response) {
+export async function readError(response: Response) {
   try {
     const payload = (await response.json()) as { message?: unknown };
     if (typeof payload.message === "string" && payload.message.trim().length > 0) {
@@ -144,7 +149,6 @@ export function ConnectorLiveControls(props: {
         return;
       }
 
-      const redirectUri = `${window.location.origin}${settingsPath}`;
       const response = await fetch(
         `${apiBaseUrl}/v1/connectors/providers/${provider}/callback`,
         {
@@ -156,7 +160,6 @@ export function ConnectorLiveControls(props: {
           body: JSON.stringify({
             code,
             state,
-            redirectUri,
             realmId: realmId?.trim() || undefined,
           }),
         },
@@ -185,10 +188,8 @@ export function ConnectorLiveControls(props: {
       setActiveProvider(provider);
 
       try {
-        const redirectUri = `${window.location.origin}${settingsPath}`;
-        const params = new URLSearchParams({ redirectUri });
         const response = await fetch(
-          `${apiBaseUrl}/v1/connectors/providers/${provider}/connect-url?${params.toString()}`,
+          `${apiBaseUrl}/v1/connectors/providers/${provider}/connect-url`,
           {
             credentials: "include",
           },

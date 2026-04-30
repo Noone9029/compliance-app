@@ -1,5 +1,6 @@
 import { BadRequestException, NotImplementedException } from "@nestjs/common";
 import type { ConnectorProvider } from "@daftar/types";
+import { loadEnv } from "@daftar/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ConnectorProviderTransport } from "./provider-transport";
@@ -173,6 +174,10 @@ function expectIsoTimestamp(value: unknown) {
   expect(Number.isNaN(Date.parse(value as string))).toBe(false);
 }
 
+function expectedConnectorCallbackRedirectUri() {
+  return new URL("/connectors/callback", loadEnv().APP_BASE_URL).toString();
+}
+
 describe("connectors service", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -191,7 +196,6 @@ describe("connectors service", () => {
       organizationId: "org_1",
       userId: "user_1",
       provider: "XERO",
-      redirectUri: "https://app.daftar.local/connectors/callback",
     });
 
     const url = new URL(response.authorizationUrl);
@@ -215,6 +219,14 @@ describe("connectors service", () => {
         expiresAt: new Date(decoded.expiresAt),
       },
     });
+    expect(mocks.xeroTransport.buildAuthorizationUrl).toHaveBeenCalledWith(
+      expect.objectContaining({
+        organizationId: "org_1",
+        userId: "user_1",
+        redirectUri: expectedConnectorCallbackRedirectUri(),
+        state,
+      }),
+    );
   });
 
   it("persists callback realmId as externalTenantId and omits secret-bearing metadata from the response", async () => {
@@ -261,7 +273,6 @@ describe("connectors service", () => {
       provider: "QUICKBOOKS_ONLINE",
       code: "auth-code",
       state,
-      redirectUri: "https://app.daftar.local/connectors/callback",
       externalTenantId: " realm-12345 ",
     });
 
@@ -269,7 +280,7 @@ describe("connectors service", () => {
       organizationId: "org_1",
       userId: "user_1",
       code: "auth-code",
-      redirectUri: "https://app.daftar.local/connectors/callback",
+      redirectUri: expectedConnectorCallbackRedirectUri(),
       externalTenantId: "realm-12345",
     });
 
@@ -326,7 +337,6 @@ describe("connectors service", () => {
         provider: "ZOHO_BOOKS",
         code: "auth-code",
         state: tamperedState,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/invalid connector state/i);
 
@@ -357,7 +367,6 @@ describe("connectors service", () => {
         provider: "XERO",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/expired connector state/i);
 
@@ -382,7 +391,6 @@ describe("connectors service", () => {
         provider: "XERO",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/already used connector state/i);
 
@@ -406,7 +414,6 @@ describe("connectors service", () => {
         provider: "ZOHO_BOOKS",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(BadRequestException);
 
@@ -417,7 +424,6 @@ describe("connectors service", () => {
         provider: "ZOHO_BOOKS",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/invalid connector state/i);
 
@@ -444,7 +450,6 @@ describe("connectors service", () => {
         provider: "XERO",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/invalid connector state/i);
 
@@ -469,7 +474,6 @@ describe("connectors service", () => {
         provider: "QUICKBOOKS_ONLINE",
         code: "auth-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback",
       }),
     ).rejects.toThrow(/missing realmId/i);
 
@@ -1085,3 +1089,4 @@ describe("connectors service", () => {
     expect(JSON.stringify(metadata)).not.toMatch(/super-secret|refresh-secret/);
   });
 });
+

@@ -14,6 +14,11 @@ vi.mock("next/navigation", () => ({
 
 import { ConnectorLiveControls } from "./connector-live-controls";
 
+function signedConnectorState(payload: Record<string, unknown>) {
+  const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+  return `${body}.signature`;
+}
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -54,15 +59,12 @@ describe("ConnectorLiveControls", () => {
   });
 
   it("completes provider callback from query params and refreshes connector data", async () => {
-    const state = Buffer.from(
-      JSON.stringify({
-        organizationId: "org_1",
-        userId: "user_1",
-        provider: "QUICKBOOKS_ONLINE",
-        nonce: "nonce_1",
-      }),
-      "utf8",
-    ).toString("base64url");
+    const state = signedConnectorState({
+      organizationId: "org_1",
+      userId: "user_1",
+      provider: "QUICKBOOKS_ONLINE",
+      nonce: "nonce_1",
+    });
 
     window.history.replaceState(
       {},
@@ -87,12 +89,10 @@ describe("ConnectorLiveControls", () => {
     expect(url).toBe("http://localhost:4000/v1/connectors/providers/QUICKBOOKS_ONLINE/callback");
     expect(init.method).toBe("POST");
     expect(init.credentials).toBe("include");
-    const expectedRedirectUri = `${window.location.origin}/nomad-events/settings/connector-settings`;
     expect(init.body).toBe(
       JSON.stringify({
         code: "auth_code",
         state,
-        redirectUri: expectedRedirectUri,
         realmId: "realm_123",
       }),
     );
@@ -102,6 +102,39 @@ describe("ConnectorLiveControls", () => {
     );
     expect(router.refresh).toHaveBeenCalled();
     expect(screen.getByText("QuickBooks Online account connected.")).toBeTruthy();
+  });
+
+  it("launches provider OAuth without sending a browser-derived redirect URI", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ authorizationUrl: "https://login.xero.test/connect" }, 200),
+    );
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        ...window.location,
+        assign,
+      },
+    });
+
+    render(
+      <ConnectorLiveControls
+        accounts={[]}
+        canSyncConnectors
+        canWriteConnectors
+        orgSlug="nomad-events"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Connect Xero" }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("http://localhost:4000/v1/connectors/providers/XERO/connect-url");
+    expect(url).not.toContain("redirectUri");
+    expect(init.credentials).toBe("include");
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("https://login.xero.test/connect"));
   });
 
   it("runs import sync for connected accounts", async () => {

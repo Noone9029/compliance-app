@@ -20,16 +20,16 @@ import { ConnectorsService } from "./connectors.service";
 const providerSchema = z.enum(connectorProviders);
 
 const connectQuerySchema = z.object({
-  redirectUri: z.string().url()
-});
+  redirectUri: z.string().url().optional()
+}).passthrough();
 
 const callbackBodySchema = z.object({
   code: z.string().min(1),
   state: z.string().min(1),
-  redirectUri: z.string().url(),
+  redirectUri: z.string().url().optional(),
   realmId: z.string().min(1).optional(),
   externalTenantId: z.string().min(1).optional()
-});
+}).passthrough();
 
 const connectorSyncSchema = z.object({
   direction: z.enum(["IMPORT", "EXPORT"]).default("IMPORT"),
@@ -60,13 +60,12 @@ export class ConnectorsController {
     requirePermission(session, "connectors.write");
 
     const provider = providerSchema.parse(providerParam);
-    const { redirectUri } = connectQuerySchema.parse(query);
+    connectQuerySchema.parse(query);
 
     return this.connectorsService.getConnectUrl({
       organizationId: session!.organization!.id,
       userId: session!.user!.id,
-      provider,
-      redirectUri
+      provider
     });
   }
 
@@ -87,7 +86,6 @@ export class ConnectorsController {
       provider,
       code: input.code,
       state: input.state,
-      redirectUri: input.redirectUri,
       externalTenantId: input.realmId ?? input.externalTenantId
     });
   }
