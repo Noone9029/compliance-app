@@ -86,4 +86,4 @@ apps/api/.local-storage/
 # UPLOADS (future)
 # =========================
 uploads/
-storage/
+/storage/

@@ -72,6 +72,11 @@ const requiredProductionEnvByService: Record<DaftarService, readonly string[]> =
     "AUTH_BCRYPT_ROUNDS",
     "COMPLIANCE_ENCRYPTION_KEY",
     "CONNECTOR_SECRETS_KEY",
+    "S3_ENDPOINT",
+    "S3_REGION",
+    "S3_BUCKET",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
   ],
   web: [
     "APP_BASE_URL",
@@ -84,6 +89,34 @@ const requiredProductionEnvByService: Record<DaftarService, readonly string[]> =
     "COMPLIANCE_ENCRYPTION_KEY",
   ],
 } as const;
+
+const localProductionDefaults: Record<string, readonly string[]> = {
+  S3_ENDPOINT: ["http://localhost:9000"],
+  S3_BUCKET: ["daftar-local"],
+  S3_ACCESS_KEY: ["minioadmin"],
+  S3_SECRET_KEY: ["minioadmin"],
+  COMPLIANCE_ENCRYPTION_KEY: ["compliance-encryption-local-dev-key"],
+  CONNECTOR_SECRETS_KEY: ["connector-secrets-local-dev-key"],
+  STRIPE_SECRET_KEY: ["sk_test_placeholder"],
+  STRIPE_WEBHOOK_SECRET: ["whsec_placeholder"],
+  XERO_CLIENT_ID: ["placeholder"],
+  XERO_CLIENT_SECRET: ["placeholder"],
+  QBO_CLIENT_ID: ["placeholder"],
+  QBO_CLIENT_SECRET: ["placeholder"],
+  ZOHO_CLIENT_ID: ["placeholder"],
+  ZOHO_CLIENT_SECRET: ["placeholder"],
+};
+
+const optionalPlaceholderKeys = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "XERO_CLIENT_ID",
+  "XERO_CLIENT_SECRET",
+  "QBO_CLIENT_ID",
+  "QBO_CLIENT_SECRET",
+  "ZOHO_CLIENT_ID",
+  "ZOHO_CLIENT_SECRET",
+] as const;
 
 function parseEnvFile(filePath: string): Record<string, string> {
   if (!existsSync(filePath)) {
@@ -150,6 +183,41 @@ function missingOrBlank(value: unknown) {
   return typeof value !== "string" || value.trim().length === 0;
 }
 
+function hasExplicitValue(
+  mergedRawEnv: Record<string, string | undefined>,
+  key: string,
+) {
+  return !missingOrBlank(mergedRawEnv[key]);
+}
+
+function isForbiddenProductionDefault(key: string, value: string) {
+  const forbidden = localProductionDefaults[key] ?? [];
+  return forbidden.includes(value.trim());
+}
+
+function isValidProductionComplianceEncryptionKey(value: string) {
+  const trimmed = value.trim();
+
+  if (/^[a-f0-9]{64}$/i.test(trimmed)) {
+    return true;
+  }
+
+  if (trimmed.startsWith("hex:")) {
+    const payload = trimmed.slice("hex:".length);
+    return /^[a-f0-9]{64}$/i.test(payload);
+  }
+
+  if (trimmed.startsWith("base64:")) {
+    try {
+      return Buffer.from(trimmed.slice("base64:".length), "base64").length === 32;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
 function assertProductionServiceEnv(
   service: DaftarService,
   mergedRawEnv: Record<string, string | undefined>,
@@ -157,6 +225,7 @@ function assertProductionServiceEnv(
   const requiredKeys = requiredProductionEnvByService[service];
   const missing = requiredKeys.filter((key) => missingOrBlank(mergedRawEnv[key]));
   if (missing.length === 0) {
+    assertProductionSecretStrength(service, mergedRawEnv);
     return;
   }
 
@@ -166,6 +235,61 @@ function assertProductionServiceEnv(
     "Daftar no longer relies on implicit schema defaults for production startup checks.",
   ].join(" ");
   throw new Error(message);
+}
+
+function assertProductionSecretStrength(
+  service: DaftarService,
+  mergedRawEnv: Record<string, string | undefined>,
+) {
+  const invalid: string[] = [];
+
+  for (const key of requiredProductionEnvByService[service]) {
+    const value = mergedRawEnv[key];
+    if (typeof value === "string" && isForbiddenProductionDefault(key, value)) {
+      invalid.push(key);
+    }
+  }
+
+  for (const key of optionalPlaceholderKeys) {
+    const value = mergedRawEnv[key];
+    if (
+      hasExplicitValue(mergedRawEnv, key) &&
+      typeof value === "string" &&
+      isForbiddenProductionDefault(key, value)
+    ) {
+      invalid.push(key);
+    }
+  }
+
+  const complianceEncryptionKey = mergedRawEnv.COMPLIANCE_ENCRYPTION_KEY;
+  if (
+    hasExplicitValue(mergedRawEnv, "COMPLIANCE_ENCRYPTION_KEY") &&
+    typeof complianceEncryptionKey === "string" &&
+    !isValidProductionComplianceEncryptionKey(complianceEncryptionKey)
+  ) {
+    invalid.push("COMPLIANCE_ENCRYPTION_KEY");
+  }
+
+  const connectorSecretsKey = mergedRawEnv.CONNECTOR_SECRETS_KEY;
+  if (
+    hasExplicitValue(mergedRawEnv, "CONNECTOR_SECRETS_KEY") &&
+    typeof connectorSecretsKey === "string" &&
+    connectorSecretsKey.trim().length < 32
+  ) {
+    invalid.push("CONNECTOR_SECRETS_KEY");
+  }
+
+  const uniqueInvalid = [...new Set(invalid)];
+  if (uniqueInvalid.length === 0) {
+    return;
+  }
+
+  throw new Error(
+    [
+      `Invalid production environment variables for ${service}: ${uniqueInvalid.join(", ")}.`,
+      "Replace local defaults/placeholders with production-safe values before starting the service.",
+    ].join(" "),
+  );
 }
 
 export function loadEnv(

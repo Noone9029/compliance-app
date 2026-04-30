@@ -21,7 +21,7 @@ Operational support procedures are documented in:
 - Infrastructure
   - PostgreSQL: primary persistence
   - Redis: queue transport/backoff/dead-letter
-  - S3-compatible storage: attachments/artifacts
+  - S3-compatible private object storage: attachments/artifacts
 
 ## Production Startup Checks
 
@@ -64,6 +64,11 @@ Required in production:
 - `AUTH_BCRYPT_ROUNDS`
 - `COMPLIANCE_ENCRYPTION_KEY`
 - `CONNECTOR_SECRETS_KEY`
+- `S3_ENDPOINT`
+- `S3_REGION`
+- `S3_BUCKET`
+- `S3_ACCESS_KEY`
+- `S3_SECRET_KEY`
 
 Recommended:
 
@@ -76,7 +81,18 @@ Optional feature vars:
 
 - Stripe: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
 - Connectors: `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, `QBO_CLIENT_ID`, `QBO_CLIENT_SECRET`, `ZOHO_CLIENT_ID`, `ZOHO_CLIENT_SECRET`
-- Storage overrides: `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`
+
+Production startup rejects local/default storage values such as `http://localhost:9000`, `daftar-local`, and `minioadmin`.
+
+Storage is provider-neutral and uses the S3-compatible API configured through the endpoint and credentials above. Supported deployment targets include AWS S3, Cloudflare R2, Wasabi, DigitalOcean Spaces, MinIO, or any compatible private object storage provider. Local MinIO is acceptable for development/test only and is rejected by production startup checks.
+
+Bucket requirements:
+
+- keep the bucket private; do not enable public object access
+- grant the API service account permission to read, write, delete only where operationally required, and perform bucket readiness checks
+- use signed upload/download URLs for temporary browser or integration access
+- avoid hardcoding provider-specific public URL assumptions; `S3_ENDPOINT` is the source of truth
+- configure object retention/backups according to compliance and customer contract requirements
 
 ### Worker (`apps/worker`)
 
@@ -125,6 +141,9 @@ Local defaults in `packages/config/src/index.ts` are for development convenience
 
 - Production should set explicit env values through the deployment platform.
 - Avoid relying on fallback defaults for infrastructure/security-sensitive keys.
+- `COMPLIANCE_ENCRYPTION_KEY` must be a real 32-byte production key using `base64:...`, `hex:...`, or raw 64-character hex format.
+- `CONNECTOR_SECRETS_KEY` must be at least 32 characters and must not use the local development default.
+- Optional Stripe and connector credentials must not be set to placeholder values in production.
 - `COMPLIANCE_ENCRYPTION_PREVIOUS_KEYS` can be set during rotation windows.
 
 ## Startup and Migration Order
@@ -141,7 +160,7 @@ Local defaults in `packages/config/src/index.ts` are for development convenience
 ## Queue, Database, and Storage Dependencies
 
 - Worker requires Redis queue connectivity before processing jobs.
-- API readiness currently checks database connectivity (`/ready`).
+- API readiness currently checks database and S3-compatible storage connectivity (`/ready`).
 - Compliance/background flow expects both Postgres and Redis healthy.
 - File and artifact operations expect configured S3-compatible storage.
 
