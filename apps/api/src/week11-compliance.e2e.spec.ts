@@ -6,6 +6,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 import { processComplianceSubmission } from "./modules/compliance/compliance-processor";
+import {
+  createDeterministicComplianceTransport,
+  prepareSubmissionForManualProcessing,
+} from "./test/compliance-processing";
 
 describe.sequential("Daftar compliance queue and lifecycle", () => {
   const prisma = new PrismaClient({
@@ -16,6 +20,7 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
     },
   });
   let app: INestApplication;
+  const transport = createDeterministicComplianceTransport();
 
   async function signIn(email: string) {
     const response = await request(app.getHttpServer())
@@ -109,13 +114,23 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
     expect(queuedStandard.body.submission.flow).toBe("CLEARANCE");
     expect(queuedSimplified.body.submission.flow).toBe("REPORTING");
 
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      queuedStandard.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: queuedStandard.body.submission.id,
+      transport,
     });
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      queuedSimplified.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: queuedSimplified.body.submission.id,
+      transport,
     });
 
     const standardDetail = await request(app.getHttpServer())
@@ -162,13 +177,23 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
       .set("Cookie", cookies)
       .expect(201);
 
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      queuedRetryable.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: queuedRetryable.body.submission.id,
+      transport,
     });
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      queuedRetryable.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: queuedRetryable.body.submission.id,
+      transport,
     });
 
     const retryableDetail = await request(app.getHttpServer())
@@ -198,9 +223,14 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
       .set("Cookie", cookies)
       .expect(201);
 
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      queuedRejected.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: queuedRejected.body.submission.id,
+      transport,
     });
 
     const rejectedDetail = await request(app.getHttpServer())
@@ -216,9 +246,14 @@ describe.sequential("Daftar compliance queue and lifecycle", () => {
       .expect(201);
     expect(retriedDocument.body.status).toBe("QUEUED");
 
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      retriedDocument.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
       submissionId: retriedDocument.body.submission.id,
+      transport,
     });
 
     const retriedDetail = await request(app.getHttpServer())

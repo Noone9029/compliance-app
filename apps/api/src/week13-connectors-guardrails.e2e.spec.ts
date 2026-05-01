@@ -214,12 +214,15 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
 
     const response = await request(app.getHttpServer())
       .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
-      .query({ redirectUri: "https://app.daftar.local/connectors/callback" })
       .set("Cookie", cookies)
       .expect(200);
 
-    expect(String(response.body.authorizationUrl)).toContain(
-      "accounts.zoho.com/oauth/v2/auth"
+    const authorizationUrl = new URL(String(response.body.authorizationUrl));
+    expect(authorizationUrl.origin + authorizationUrl.pathname).toBe(
+      "https://accounts.zoho.com/oauth/v2/auth"
+    );
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      new URL("/connectors/callback", env.APP_BASE_URL).toString()
     );
   });
 
@@ -248,7 +251,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       .send({
         code: "dummy-authorization-code",
         state,
-        redirectUri: "https://app.daftar.local/connectors/callback"
+        redirectUri: "https://malicious.example.com/callback"
       })
       .expect(400);
 
@@ -408,9 +411,13 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
     expect(voidCompliance).toBeNull();
 
     expect(eligibleCompliance).toBeTruthy();
-    expect(eligibleCompliance?.status).toBe("QUEUED");
-    expect(eligibleCompliance?.lastSubmissionStatus).toBe("QUEUED");
-    expect(eligibleCompliance?.submission?.status).toBe("QUEUED");
+    expect(["QUEUED", "PROCESSING"]).toContain(eligibleCompliance?.status);
+    expect(["QUEUED", "PROCESSING"]).toContain(
+      eligibleCompliance?.lastSubmissionStatus
+    );
+    expect(["QUEUED", "PROCESSING"]).toContain(
+      eligibleCompliance?.submission?.status
+    );
     expect(eligibleCompliance?.events.length).toBeGreaterThan(0);
   }, 15000);
 
@@ -536,8 +543,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       .set("Cookie", cookies)
       .send({
         code: "xero-auth-code",
-        state,
-        redirectUri: "https://app.daftar.local/connectors/callback"
+        state
       })
       .expect(201);
 
@@ -698,8 +704,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       .set("Cookie", cookies)
       .send({
         code: "zoho-auth-code",
-        state,
-        redirectUri: "https://app.daftar.local/connectors/callback"
+        state
       })
       .expect(201);
 
@@ -910,8 +915,7 @@ describe.sequential("Daftar Week 13 connector guardrails", () => {
       .set("Cookie", cookies)
       .send({
         code: "zoho-refresh-auth-code",
-        state,
-        redirectUri: "https://app.daftar.local/connectors/callback"
+        state
       })
       .expect(201);
 

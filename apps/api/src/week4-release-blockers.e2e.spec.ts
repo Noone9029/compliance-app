@@ -95,13 +95,14 @@ describe.sequential("Daftar Week 4 release blockers", () => {
 
     const connectAttempt = await request(app.getHttpServer())
       .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
-      .query({
-        redirectUri: "https://app.daftar.local/connectors/callback"
-      })
       .set("Cookie", cookies)
       .expect(200);
-    expect(String(connectAttempt.body.authorizationUrl)).toContain(
-      "accounts.zoho.com/oauth/v2/auth"
+    const authorizationUrl = new URL(String(connectAttempt.body.authorizationUrl));
+    expect(authorizationUrl.origin + authorizationUrl.pathname).toBe(
+      "https://accounts.zoho.com/oauth/v2/auth"
+    );
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      new URL("/connectors/callback", env.APP_BASE_URL).toString()
     );
 
     const state = encodeConnectorState({
@@ -116,8 +117,7 @@ describe.sequential("Daftar Week 4 release blockers", () => {
       .set("Cookie", cookies)
       .send({
         code: "dummy-authorization-code",
-        state,
-        redirectUri: "https://app.daftar.local/connectors/callback"
+        state
       })
       .expect(400);
     expect(String(callbackAttempt.body.message)).toMatch(/missing realmId/i);

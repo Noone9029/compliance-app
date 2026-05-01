@@ -7,10 +7,11 @@ import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 
 describe.sequential("Daftar Week 2 foundation", () => {
+  const env = loadEnv();
   const prisma = new PrismaClient({
     datasources: {
       db: {
-        url: loadEnv().DATABASE_URL
+        url: env.DATABASE_URL
       }
     }
   });
@@ -416,13 +417,14 @@ describe.sequential("Daftar Week 2 foundation", () => {
 
     const connectAttempt = await request(app.getHttpServer())
       .get("/v1/connectors/providers/ZOHO_BOOKS/connect-url")
-      .query({
-        redirectUri: "https://app.daftar.local/connectors/callback"
-      })
       .set("Cookie", cookies)
       .expect(200);
-    expect(String(connectAttempt.body.authorizationUrl)).toContain(
-      "accounts.zoho.com/oauth/v2/auth"
+    const authorizationUrl = new URL(String(connectAttempt.body.authorizationUrl));
+    expect(authorizationUrl.origin + authorizationUrl.pathname).toBe(
+      "https://accounts.zoho.com/oauth/v2/auth"
+    );
+    expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+      new URL("/connectors/callback", env.APP_BASE_URL).toString()
     );
 
     const logs = await request(app.getHttpServer())
@@ -476,9 +478,6 @@ describe.sequential("Daftar Week 2 foundation", () => {
 
     await request(app.getHttpServer())
       .get("/v1/connectors/providers/XERO/connect-url")
-      .query({
-        redirectUri: "https://app.daftar.local/connectors/callback"
-      })
       .set("Cookie", cookies)
       .expect(403);
 

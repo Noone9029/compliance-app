@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 import { AuthNotificationService } from "./modules/auth/auth-notification.service";
+import { installInMemoryStorage } from "./test/in-memory-storage";
 
 describe.sequential("Daftar Week 1 platform", () => {
   const prisma = new PrismaClient({
@@ -20,6 +21,7 @@ describe.sequential("Daftar Week 1 platform", () => {
 
   beforeAll(async () => {
     app = await createApp();
+    installInMemoryStorage(app);
     await app.init();
     authNotificationService = app.get(AuthNotificationService);
   });

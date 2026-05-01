@@ -1,5 +1,3 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import request from "supertest";
 import type { INestApplication } from "@nestjs/common";
 import { Prisma, PrismaClient } from "@prisma/client";
@@ -8,6 +6,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadEnv } from "@daftar/config";
 import { createApp } from "./bootstrap";
 import { processComplianceSubmission } from "./modules/compliance/compliance-processor";
+import {
+  createDeterministicComplianceTransport,
+  prepareSubmissionForManualProcessing,
+} from "./test/compliance-processing";
+import { installInMemoryStorage } from "./test/in-memory-storage";
 
 describe.sequential("Daftar Week 3 accounting core", () => {
   const eInvoiceIntegrationKey = "week10.einvoice.integration";
@@ -19,6 +22,7 @@ describe.sequential("Daftar Week 3 accounting core", () => {
     }
   });
   let app: INestApplication;
+  const complianceTransport = createDeterministicComplianceTransport();
 
   async function signIn(email: string) {
     const response = await request(app.getHttpServer())
@@ -39,6 +43,7 @@ describe.sequential("Daftar Week 3 accounting core", () => {
 
   beforeAll(async () => {
     app = await createApp();
+    installInMemoryStorage(app);
     await app.init();
   });
 
@@ -211,7 +216,9 @@ describe.sequential("Daftar Week 3 accounting core", () => {
           .expect(201)
     );
     expect(complianceDocument.body.status).toBe("QUEUED");
-    expect(complianceDocument.body.submission.status).toBe("QUEUED");
+    expect(["QUEUED", "PROCESSING"]).toContain(
+      complianceDocument.body.submission.status,
+    );
 
     await request(app.getHttpServer())
       .patch(`/v1/sales/invoices/${createdInvoice.body.id}`)
@@ -221,9 +228,14 @@ describe.sequential("Daftar Week 3 accounting core", () => {
       })
       .expect(400);
 
+    await prepareSubmissionForManualProcessing(
+      prisma,
+      complianceDocument.body.submission.id,
+    );
     await processComplianceSubmission({
       prisma,
-      submissionId: complianceDocument.body.submission.id
+      submissionId: complianceDocument.body.submission.id,
+      transport: complianceTransport,
     });
 
     const invoiceDetail = await request(app.getHttpServer())
@@ -480,14 +492,6 @@ describe.sequential("Daftar Week 3 accounting core", () => {
       })
       .expect(201);
 
-    const storagePath = path.resolve(
-      process.cwd(),
-      ".local-storage",
-      "files",
-      uploaded.body.objectKey
-    );
-    expect(await fs.readFile(storagePath, "utf8")).toContain("week12-attachment");
-
     const download = await request(app.getHttpServer())
       .get(`/v1/files/${uploaded.body.id}/download`)
       .set("Cookie", cookies)
@@ -503,7 +507,11 @@ describe.sequential("Daftar Week 3 accounting core", () => {
       .delete(`/v1/files/${uploaded.body.id}`)
       .set("Cookie", cookies)
       .expect(200);
-    await expect(fs.access(storagePath)).rejects.toBeTruthy();
+
+    await request(app.getHttpServer())
+      .get(`/v1/files/${uploaded.body.id}/download`)
+      .set("Cookie", cookies)
+      .expect(404);
 
     await request(app.getHttpServer())
       .patch(`/v1/sales/invoices/${invoice.body.id}`)

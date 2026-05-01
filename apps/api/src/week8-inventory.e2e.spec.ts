@@ -3,6 +3,7 @@ import type { INestApplication } from "@nestjs/common";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createApp } from "./bootstrap";
+import { installInMemoryStorage } from "./test/in-memory-storage";
 
 describe.sequential("Daftar Week 8 inventory", () => {
   let app: INestApplication;
@@ -18,6 +19,7 @@ describe.sequential("Daftar Week 8 inventory", () => {
 
   beforeAll(async () => {
     app = await createApp();
+    installInMemoryStorage(app);
     await app.init();
   });
 

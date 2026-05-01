@@ -12,6 +12,7 @@ import {
   ComplianceTransportError,
   type ComplianceTransportRequest,
 } from "./modules/compliance/compliance-transport";
+import { prepareSubmissionForManualProcessing } from "./test/compliance-processing";
 
 describe.sequential("Daftar staged compliance onboarding", () => {
   const prisma = new PrismaClient({
@@ -483,6 +484,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
           clientSecret: string;
         }
       | null = null;
+    await prepareSubmissionForManualProcessing(prisma, queued.body.submission.id);
     await processComplianceSubmission({
       prisma,
       submissionId: queued.body.submission.id,
@@ -619,6 +621,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(queued.body.status).toBe("QUEUED");
 
     let scheduledDelay: number | null = null;
+    await prepareSubmissionForManualProcessing(prisma, queued.body.submission.id);
     await processComplianceSubmission({
       prisma,
       submissionId: queued.body.submission.id,
@@ -689,6 +692,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
     expect(queued.body.status).toBe("QUEUED");
 
     let retryScheduled = false;
+    await prepareSubmissionForManualProcessing(prisma, queued.body.submission.id);
     await processComplianceSubmission({
       prisma,
       submissionId: queued.body.submission.id,
@@ -771,6 +775,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
 
     let deadLetterSubmissionId: string | null = null;
     let deadLetterFailureCategory: string | null = null;
+    await prepareSubmissionForManualProcessing(prisma, queued.body.submission.id);
     await processComplianceSubmission({
       prisma,
       submissionId: queued.body.submission.id,
@@ -870,6 +875,7 @@ describe.sequential("Daftar staged compliance onboarding", () => {
         },
       });
 
+      await prepareSubmissionForManualProcessing(prisma, queued.body.submission.id);
       await processComplianceSubmission({
         prisma,
         submissionId: queued.body.submission.id,
